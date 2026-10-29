@@ -1,7 +1,7 @@
-import type { CanonicalTender } from "../adapters/base.js";
+import type { CanonicalTender } from "../../src/adapters/base.js";
 
-// Synthetic notices for demos and tests. Buyers are fictional; every record is flagged isSample
-// and the UI labels it. Dates are relative to "now" so deadlines stay in the future.
+// Synthetic notices used only as test fixtures; they are never loaded into the database.
+// Buyers are fictional. Dates are relative to "now" so deadlines stay in the future.
 const day = 86400000;
 const at = (offsetDays: number, hour = 10) => {
   const d = new Date(Date.now() + offsetDays * day);

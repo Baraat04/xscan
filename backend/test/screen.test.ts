@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { z } from "zod";
 import { TedAdapter } from "../src/adapters/ted.js";
-import { sampleTenders } from "../src/data/samples.js";
+import { sampleTenders } from "./fixtures/samples.js";
 import { jsonSchemaFor, untrusted } from "../src/services/llm.js";
 import { verifyQuote } from "../src/services/quotes.js";
 import { screenTender } from "../src/services/screen.js";

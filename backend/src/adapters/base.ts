@@ -1,5 +1,6 @@
-export type Source = "TED" | "SAM_GOV" | "USASPENDING";
-export type Jurisdiction = "EU" | "US";
+export type Source = "TED" | "SAM_GOV" | "USASPENDING" | "WEB";
+/** OTHER: a tender imported by link from a site outside the EU and US official sources. */
+export type Jurisdiction = "EU" | "US" | "OTHER";
 
 /** One block of verbatim source text. Labels follow the source's own section naming. */
 export interface NoticeSection {
@@ -35,7 +36,10 @@ export interface CanonicalTender {
 
 export interface FetchOptions {
   since?: Date;
+  /** Upper bound on records scanned. Adapters page newest-first, so the caller can stop early. */
   limit?: number;
+  /** Lets an adapter skip fetching full details for records already on file. */
+  isKnown?: (sourceId: string) => Promise<boolean>;
 }
 
 export interface SourceStatus {

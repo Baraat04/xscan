@@ -1,16 +1,16 @@
 import { EventEmitter } from "node:events";
 import { TedAdapter } from "../adapters/ted.js";
 import { SamGovAdapter, UsaSpendingAdapter } from "../adapters/us.js";
-import type { BaseProcurementAdapter, CanonicalTender } from "../adapters/base.js";
-import { sampleTenders } from "../data/samples.js";
+import type { BaseProcurementAdapter, CanonicalTender, Source } from "../adapters/base.js";
 import { audit, db, uuid } from "../db/index.js";
 import { screenTender } from "./screen.js";
 
 export const adapters: BaseProcurementAdapter[] = [new TedAdapter(), new SamGovAdapter(), new UsaSpendingAdapter()];
 export const ingestBus = new EventEmitter();
+ingestBus.setMaxListeners(200);
 
 /** Upsert keyed on (source, source_id). Re-screens on every upsert so rule changes reapply. */
-export async function upsertTender(t: CanonicalTender) {
+export async function upsertTender(t: CanonicalTender, importedBy: string | null = null) {
   const screen = screenTender(t);
   const status = screen.verdict === "CLEARED" ? "cleared" : "flagged";
   const existing = await db.one<{ id: string; status: string }>("SELECT id, status FROM tenders WHERE source = $1 AND source_id = $2", [t.source, t.sourceId]);
@@ -32,35 +32,63 @@ export async function upsertTender(t: CanonicalTender) {
   const id = uuid();
   await db.query(
     `INSERT INTO tenders (id, source, source_id, is_sample, jurisdiction, url, title, summary, language, buyer_name, buyer_country,
-     notice_type, procedure_type, cpv, naics, psc, estimated_value, currency, published_at, deadline_at, sections, raw, screen, screen_score, status)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
-    [id, t.source, t.sourceId, ...values, status],
+     notice_type, procedure_type, cpv, naics, psc, estimated_value, currency, published_at, deadline_at, sections, raw, screen, screen_score, status, imported_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`,
+    [id, t.source, t.sourceId, ...values, status, importedBy],
   );
   return { id, inserted: true, status };
 }
 
-export async function seedSamples() {
-  for (const t of sampleTenders()) await upsertTender(t);
+/** Only live source data belongs in the database. Removes any synthetic notices an older build seeded. */
+export async function purgeSamples() {
+  const { rows } = await db.query("DELETE FROM tenders WHERE is_sample RETURNING id");
+  if (rows.length) await audit("tenders.purge_samples", "tender", null, { removed: rows.length });
+  return rows.length;
 }
 
 let running = false;
+export const isIngesting = () => running;
 
-/** Collect → validate → normalise → upsert → screen, per source. One failing record never stops the run. */
-export async function runIngestion(limitPerSource = 30) {
+export interface IngestOptions {
+  /** How many new tenders to collect in total, split evenly across the chosen sources. */
+  target?: number;
+  sources?: Source[];
+  userId?: string | null;
+}
+
+/**
+ * Collect → validate → normalise → upsert → screen, per source. Sources are read newest-first and each one
+ * stops as soon as it has delivered its share of new tenders, or after scanning a bounded number of records.
+ * A source that runs dry passes its unused share on to the next. One failing record never stops the run.
+ */
+export async function runIngestion({ target = 120, sources, userId = null }: IngestOptions = {}) {
   if (running) return { alreadyRunning: true };
   running = true;
+  const runId = uuid();
+  const chosen = adapters.filter((a) => a.status().enabled && (!sources || sources.includes(a.source)));
   const results = [];
+  let remaining = target;
+  ingestBus.emit("run", { id: runId, status: "running", target, inserted: 0, sources: chosen.map((a) => a.source) });
   try {
-    for (const a of adapters) {
-      const st = a.status();
-      if (!st.enabled) continue;
+    for (const [i, a] of chosen.entries()) {
+      const share = Math.ceil(remaining / (chosen.length - i));
+      if (share <= 0) break;
       const jobId = uuid();
-      const job = { id: jobId, source: a.source, fetched: 0, inserted: 0, updated: 0, cleared: 0, flagged: 0, status: "running", error: null as string | null };
-      await db.query("INSERT INTO ingestion_jobs (id, source, status) VALUES ($1,$2,'running')", [jobId, a.source]);
+      const job = { id: jobId, runId, source: a.source, target: share, fetched: 0, inserted: 0, updated: 0, cleared: 0, flagged: 0, status: "running", error: null as string | null };
+      await db.query("INSERT INTO ingestion_jobs (id, source, status, target, user_id) VALUES ($1,$2,'running',$3,$4)", [jobId, a.source, share, userId]);
       ingestBus.emit("job", job);
       try {
-        for await (const raw of a.fetchRecords({ limit: limitPerSource })) {
+        // Most records near the top are already on file after earlier runs, so scan well past the share.
+        // Known records cost one lookup each (TED skips even their download), so the bound can be generous.
+        const known = async (sourceId: string) => Boolean(await db.one("SELECT 1 FROM tenders WHERE source = $1 AND source_id = $2", [a.source, sourceId]));
+        for await (const raw of a.fetchRecords({ limit: share * 6 + 1500, isKnown: known })) {
           job.fetched++;
+          if (job.fetched % 25 === 0) ingestBus.emit("job", job);
+          // Already on file: skip with one lookup instead of re-saving, so later updates reach new records fast.
+          if (await known(a.getSourceIdentifier(raw))) {
+            job.updated++;
+            continue;
+          }
           let t: CanonicalTender | null = null;
           try {
             t = a.normalize(raw);
@@ -71,7 +99,8 @@ export async function runIngestion(limitPerSource = 30) {
           const r = await upsertTender(t);
           r.inserted ? job.inserted++ : job.updated++;
           r.status === "cleared" ? job.cleared++ : job.flagged++;
-          ingestBus.emit("record", { source: a.source, title: t.title, status: r.status, id: r.id });
+          if (r.inserted) ingestBus.emit("record", { runId, source: a.source, title: t.title, status: r.status, id: r.id });
+          if (job.inserted >= share) break;
         }
         job.status = "complete";
       } catch (e) {
@@ -84,9 +113,15 @@ export async function runIngestion(limitPerSource = 30) {
       );
       ingestBus.emit("job", job);
       results.push(job);
+      remaining -= job.inserted;
     }
-    await audit("ingestion.run", "ingestion", null, results);
-    return { jobs: results };
+    const inserted = results.reduce((n, j) => n + j.inserted, 0);
+    await audit("ingestion.run", "ingestion", runId, { target, userId, jobs: results });
+    ingestBus.emit("run", { id: runId, status: "complete", target, inserted, jobs: results });
+    return { runId, inserted, jobs: results };
+  } catch (e) {
+    ingestBus.emit("run", { id: runId, status: "failed", target, error: (e as Error).message });
+    throw e;
   } finally {
     running = false;
   }

@@ -2,10 +2,10 @@
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS tenders (
   id              uuid PRIMARY KEY,
-  source          text NOT NULL,            -- TED | SAM_GOV | USASPENDING
-  source_id       text NOT NULL,            -- publication number / notice id / award id
+  source          text NOT NULL,            -- TED | SAM_GOV | USASPENDING | WEB
+  source_id       text NOT NULL,            -- publication number / notice id / award id / page URL
   is_sample       boolean NOT NULL DEFAULT false,
-  jurisdiction    text NOT NULL,            -- EU | US
+  jurisdiction    text NOT NULL,            -- EU | US | OTHER
   url             text,
   title           text NOT NULL,
   summary         text,
@@ -86,4 +86,33 @@ CREATE TABLE IF NOT EXISTS audit_events (
   entity_id text,
   detail    jsonb
 );
+
+CREATE TABLE IF NOT EXISTS users (
+  id            uuid PRIMARY KEY,
+  email         text NOT NULL UNIQUE,         -- stored lower-case
+  name          text NOT NULL,
+  password_hash text NOT NULL,                -- scrypt$salt$key
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash text PRIMARY KEY,                -- sha256 of the cookie value; the raw token is never stored
+  user_id    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions (user_id);
+
+CREATE TABLE IF NOT EXISTS saved_tenders (
+  user_id    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  tender_id  uuid NOT NULL REFERENCES tenders(id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, tender_id)
+);
+
+-- Who added what. Added after the first release, so they are nullable and created idempotently.
+ALTER TABLE tenders ADD COLUMN IF NOT EXISTS imported_by uuid REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE trials ADD COLUMN IF NOT EXISTS user_id uuid REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS user_id uuid REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS target int;
 `;

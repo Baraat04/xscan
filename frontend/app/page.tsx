@@ -1,214 +1,264 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { Gavel } from "@/components/Icons";
-import { Record } from "@/components/Record";
+import { RiskBoxes, SourceTag } from "@/components/Bits";
 import { classify, useStore } from "@/components/Store";
 import { api } from "@/lib/api";
-import { humanCategory, sourceLabel } from "@/lib/format";
-import type { Block } from "@/lib/transcript";
 import type { TenderSummary, Trial } from "@/lib/types";
 
-const STEPS = [
-  { who: "THE CLERK", what: "screens every notice", how: "Free rules catch short deadlines, brand names without “or equivalent”, outsized turnover demands and local-only eligibility. Plain notices are cleared." },
-  { who: "THE PROSECUTOR", what: "brings the counts", how: "Reads a referred notice for conditions that fit one supplier, and must quote the notice word for word for each count." },
-  { who: "THE DEFENSE", what: "answers for the buyer", how: "Gives the most honest legitimate reason a buyer could have, and concedes when there is none." },
-  { who: "THE COURT", what: "rules count by count", how: "Weighs both sides, gives no weight to any quote missing from the notice, and sets a risk level." },
-  { who: "THE CLERK", what: "writes to the buyer", how: "Drafts a request for clarification in the notice’s own language, ready to copy." },
-];
-
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n).replace(/\s+\S*$/, "")}…` : s);
+const RULING_WORD = { SUSTAINED: "sustained", DISMISSED: "dismissed", REFER_FOR_CLARIFICATION: "ask the buyer" } as const;
+const STANCE_WORD = { contest: "Contests", partially_concede: "Concedes in part", concede: "Concedes" } as const;
 
-/** A short page lifted from the latest ruling: one count, argued and decided. */
-function excerpt(trial: Trial, tender: TenderSummary): Block[] {
-  const v = trial.verdict!;
+/**
+ * The counts the three plies carry. The canary copy shows the count the court sustained (the prosecution's strongest),
+ * the original shows a quote the court could verify, and the pink copy shows the defense answering that same quote.
+ */
+function plies(trial: Trial) {
   const charges = trial.prosecution!.charges;
-  const ruling = v.rulings.find((r) => r.ruling === "SUSTAINED") ?? v.rulings[0];
-  const c = charges.find((x) => x.id === ruling.charge_id) ?? charges[0];
-  const n = charges.indexOf(c) + 1;
-  const reb = trial.defense?.rebuttals.find((r) => r.charge_id === c.id);
-  const word = { SUSTAINED: "SUSTAINED", DISMISSED: "DISMISSED", REFER_FOR_CLARIFICATION: "REFERRED TO THE BUYER" }[ruling.ruling];
-  const b: Block[] = [
-    { kind: "center", text: `${sourceLabel(tender.source)} ${tender.source_id}`, tone: "muted" },
-    { kind: "center", text: `COUNT ${n} — ${c.title.toUpperCase()}` },
-    { kind: "blank" },
-    { kind: "speech", speaker: "THE PROSECUTOR", runs: [{ text: clip(c.argument, 150) }] },
-  ];
-  if (c.quote) {
-    b.push({ kind: "paren", exhibit: { id: `P-${n}`, side: "p", quote: c.quote, status: c.quote_check.status, sectionKey: c.quote_check.sectionKey, start: c.quote_check.start, end: c.quote_check.end },
-      runs: [{ text: `(Exhibit P-${n}: ` }, { text: `"${clip(c.quote, 90)}"`, tone: "quote" }, { text: ")" }] });
-  }
-  if (reb) b.push({ kind: "blank" }, { kind: "speech", speaker: "THE DEFENSE", runs: [{ text: clip(reb.explanation, 140) }] });
-  b.push({ kind: "blank" }, { kind: "speech", speaker: "THE COURT", runs: [{ text: `Count ${n} is ` }, { text: word, tone: "pencil" }, { text: `. ${clip(ruling.reasoning, 110)}` }] });
-  return b;
+  const rulings = trial.verdict!.rulings;
+  const ruling = (id: string) => rulings.find((r) => r.charge_id === id);
+  const lead = charges.find((c) => ruling(c.id)?.ruling === "SUSTAINED") ?? charges[0];
+  const exhibit =
+    charges.find((c) => c.quote && c.quote_check.status !== "NOT_FOUND" && ruling(c.id)?.ruling !== "DISMISSED" && c.id !== lead.id) ??
+    charges.find((c) => c.quote && c.quote_check.status !== "NOT_FOUND") ??
+    lead;
+  const missing = charges.find((c) => c.quote && c.quote_check.status === "NOT_FOUND");
+  const answer = trial.defense?.rebuttals.find((r) => r.charge_id === exhibit.id) ?? trial.defense?.rebuttals[0];
+  const quoted = charges.filter((c) => c.quote);
+  const found = quoted.filter((c) => c.quote_check.status !== "NOT_FOUND").length;
+  const ruled = [lead, exhibit].filter((c, i, a) => a.indexOf(c) === i).map((c) => `${c.id} ${RULING_WORD[ruling(c.id)?.ruling ?? "REFER_FOR_CLARIFICATION"]}`);
+  return { lead, exhibit, missing, answer, found, quoted: quoted.length, ruled: ruled.join(" · "), n: (c: typeof lead) => charges.indexOf(c) + 1 };
+}
+
+/** The hearing as the fanfold printer logged it, one line per filing. */
+function hearingLines(trial: Trial) {
+  const lines: { ch: "p" | "d" | "c"; who: string; text: string }[] = [];
+  for (const c of trial.prosecution?.charges ?? []) lines.push({ ch: "p", who: "PROS", text: `${c.id} ${c.title}` });
+  for (const r of trial.defense?.rebuttals ?? []) lines.push({ ch: "d", who: "DEF", text: `${r.charge_id} ${STANCE_WORD[r.stance].toLowerCase()}` });
+  for (const r of trial.verdict?.rulings ?? []) lines.push({ ch: "c", who: "COURT", text: `${r.charge_id} ${RULING_WORD[r.ruling]}` });
+  if (trial.verdict) lines.push({ ch: "c", who: "COURT", text: `risk ${trial.verdict.risk_level} ${trial.verdict.risk_score.toFixed(2)}` });
+  return lines;
+}
+
+/** Types a line once, the way the court's typewriter fills the ruling field. */
+function useTyped(text: string) {
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    if (!text) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return setN(text.length);
+    setN(0);
+    let i = 0;
+    const t = setInterval(() => { i += 1; setN(i); if (i >= text.length) clearInterval(t); }, 42);
+    return () => clearInterval(t);
+  }, [text]);
+  return { shown: text.slice(0, n), done: n >= text.length };
 }
 
 export default function OverviewPage() {
-  const { tenders, threshold, error } = useStore();
-  const router = useRouter();
+  const { tenders, threshold, requireUser, setAddOpen } = useStore();
   const [latest, setLatest] = useState<{ tender: TenderSummary; trial: Trial } | null>(null);
+  const [fanned, setFanned] = useState(false);
 
   const groups = useMemo(() => {
     const all = tenders ?? [];
     const by = (k: ReturnType<typeof classify>) => all.filter((t) => classify(t, threshold) === k);
-    return {
-      all,
-      cleared: by("cleared"),
-      waiting: by("referred").sort((a, b) => (b.screen_score ?? 0) - (a.screen_score ?? 0)),
-      running: by("running"),
-      ruled: by("ruled"),
-    };
+    return { all, cleared: by("cleared"), waiting: by("referred"), ruled: by("ruled") };
   }, [tenders, threshold]);
 
-  // Latest completed hearing feeds the excerpt. Its id is stable, so this refetches only when a new ruling lands.
-  const latestRuled = groups.ruled[0];
+  // The forms are filled from the highest-risk real ruling on file.
+  const featured = useMemo(() => [...groups.ruled].sort((a, b) => (b.risk_score ?? 0) - (a.risk_score ?? 0))[0], [groups.ruled]);
   useEffect(() => {
-    if (!latestRuled?.trial_id) return;
+    if (!featured?.trial_id) return;
     let alive = true;
-    api.trial(latestRuled.trial_id).then((r) => alive && r.trial.verdict && r.trial.prosecution && setLatest({ tender: latestRuled, trial: r.trial })).catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [latestRuled?.trial_id]); // eslint-disable-line react-hooks/exhaustive-deps
+    api.trial(featured.trial_id).then((r) => alive && r.trial.verdict && r.trial.prosecution?.charges.length && setLatest({ tender: featured, trial: r.trial })).catch(() => {});
+    return () => { alive = false; };
+  }, [featured?.trial_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const samples = groups.all.filter((t) => t.is_sample).sort((a, b) => (b.screen_score ?? 0) - (a.screen_score ?? 0));
-  const fresh = samples.find((t) => !t.trial_id);
-  const demo = fresh ?? samples[0];
-  const demoHref = demo ? `/case/${demo.id}${fresh ? "?call=1" : ""}` : "/docket";
-  const total = groups.all.length || 1;
-  const share = (n: number) => `${(n / total) * 100}%`;
+  const t = latest?.tender;
+  const trial = latest?.trial;
+  const v = trial?.verdict;
+  const p = trial ? plies(trial) : null;
+  const caseNo = t ? (t.source === "WEB" ? `WEB ${t.source_id.slice(0, 10)}` : `${t.source === "USASPENDING" ? "USA" : t.source} ${t.source_id}`) : "—";
+  const typed = useTyped(p?.ruled ?? "");
+  const log = trial ? hearingLines(trial) : [];
 
-  const ledger = [
-    { label: "Collected from the sources", n: groups.all.length, href: "/docket" },
-    { label: `Cleared at screening (below ${threshold.toFixed(2)})`, n: groups.cleared.length, href: "/docket?status=cleared", tone: "off" },
-    { label: "Referred to the tribunal", n: groups.waiting.length + groups.running.length, href: "/docket?status=referred" },
-    { label: "Ruled on", n: groups.ruled.length, href: "/docket?status=ruled", tone: "court" },
+  const funnel = [
+    { label: "On file", n: groups.all.length, href: "/docket", tone: "all" },
+    { label: "Look normal", n: groups.cleared.length, href: "/docket?status=cleared", tone: "off" },
+    { label: "To check", n: groups.waiting.length, href: "/docket?status=referred", tone: "p" },
+    { label: "Ruled by the court", n: groups.ruled.length, href: "/docket?status=ruled", tone: "c" },
   ];
-
-  const excerptBlocks = useMemo(() => (latest ? excerpt(latest.trial, latest.tender) : null), [latest]);
+  const max = Math.max(1, groups.all.length);
+  // Per-source counts for the sources strip, from the tenders on file.
+  const bySource = (s: string) => groups.all.filter((x) => x.source === s).length;
+  const byHost = (h: string) => groups.all.filter((x) => x.source === "WEB" && (x.url ?? "").includes(h)).length;
 
   return (
-    <div className="page">
-      <section className="ov-hero">
-        <div className="ov-intro">
-          <p className="ov-court">XSCAN TENDER TRIBUNAL · EU AND US PUBLIC PROCUREMENT</p>
-          <h1>Public tenders, put on trial.</h1>
-          <p className="ov-lede">
-            xscan reads new tenders from TED, SAM.gov and USAspending and clears the ordinary ones on its own. The suspicious ones are argued by a prosecutor, a defense and a court. Every quote is checked against the notice, and every case ends with a question you can send to the buyer.
-          </p>
-          <div className="ov-actions">
-            <Link className="btn btn-ink btn-lg" href={demoHref}><Gavel /> {fresh ? "Watch a sample hearing" : "Open a sample case"}</Link>
-            <Link className="btn btn-paper btn-lg" href="/docket?status=referred">See what awaits a hearing</Link>
+    <div className="landing">
+      <section className="hero">
+        <div className="hero-copy">
+          <h1>Every tender, filed in <em>triplicate</em></h1>
+          <p className="hero-lede">One copy goes to the prosecutor, one to the defense, and the original stays with the court. Every quote they use is checked against the notice.</p>
+          <div className="hero-actions">
+            <Link className="btn btn-primary btn-lg" href={t ? `/court?case=${t.id}` : "/court"}>Watch the live court</Link>
+            <button className="btn btn-lg" onClick={() => requireUser(() => setAddOpen(true))}>Add a tender</button>
           </div>
-          <p className="ov-fine">{fresh ? "Starts a live hearing on a synthetic notice. It takes about a minute." : "Sample notices are synthetic and their buyers fictional."}</p>
-
-          <div className="ledger" aria-label="The record so far">
-            <h2>THE RECORD SO FAR</h2>
-            <ul>
-              {ledger.map((l) => (
-                <li key={l.label}>
-                  <Link href={l.href} className={l.tone ? `tone-${l.tone}` : undefined}>
-                    <span>{l.label}</span>
-                    <i aria-hidden />
-                    <b>{tenders ? l.n : "…"}</b>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-            <div className="flowbar" aria-hidden>
-              <span className="seg-off" style={{ width: share(groups.cleared.length) }} />
-              <span className="seg-ref" style={{ width: share(groups.waiting.length + groups.running.length) }} />
-              <span className="seg-court" style={{ width: share(groups.ruled.length) }} />
-            </div>
-            <p className="flowbar-key"><i className="seg-off" /> cleared <i className="seg-ref" /> referred <i className="seg-court" /> ruled</p>
-            {error && <p className="error-line" role="alert">{error}</p>}
-          </div>
+          <ul className="ply-key" aria-label="Which copy is whose">
+            <li><i className="k-c" aria-hidden />Original: the court</li>
+            <li><i className="k-p" aria-hidden />Canary copy: the prosecution</li>
+            <li><i className="k-d" aria-hidden />Pink copy: the defense</li>
+          </ul>
+          <p className="hero-keys">{tenders ? <b>{groups.all.length.toLocaleString("en-GB")}</b> : "…"} real tenders on file, from official APIs and the websites people add.</p>
         </div>
 
-        <div className="ov-excerpt">
-          {excerptBlocks && latest ? (
-            <>
-              <Record blocks={excerptBlocks} animate follow={false} pending={null} pendingSince={null} onExhibit={() => router.push(`/case/${latest.tender.id}`)} />
-              <div className="ov-excerpt-foot">
-                <span className="stamp-mini court">{latest.trial.verdict!.risk_level} · {latest.trial.verdict!.risk_score.toFixed(2)}</span>
-                <Link href={`/case/${latest.tender.id}`}>Read the full record</Link>
+        <div className="triplicate-wrap">
+          {/* Clicking the stack fans it; the button below does the same from the keyboard. */}
+          <div className={`triplicate${fanned ? " fan" : ""}`} onClick={(e) => !(e.target as HTMLElement).closest("a") && setFanned((f) => !f)}>
+            <div className="ply ply-d" aria-hidden={!fanned}>
+              <div className="f-head"><span>Form XS-3 · Copy 3</span><span>{caseNo}</span></div>
+              <div className="f-row"><span className="f-label">Count</span><span className="f-val carbon">{p ? `${p.exhibit.id} · ${p.exhibit.title}` : "—"}</span></div>
+              <div className="f-row"><span className="f-label">Defense answer</span><span className="f-val carbon"><span className="clamp">{p?.answer ? p.answer.explanation : "Gives the most honest good reason the buyer could have."}</span></span></div>
+              <div className="f-row"><span className="f-label">Position</span><span className="f-val carbon">{p?.answer ? STANCE_WORD[p.answer.stance] : "—"}</span></div>
+              <span className="f-copy">Copy 3 · Defense</span>
+            </div>
+            <div className="ply ply-p" aria-hidden={!fanned}>
+              <div className="f-head"><span>Form XS-3 · Copy 2</span><span>{caseNo}</span></div>
+              <div className="f-row"><span className="f-label">Count</span><span className="f-val carbon">{p ? `${p.lead.id} · ${p.lead.title}` : "—"}</span></div>
+              <div className="f-row"><span className="f-label">Argument</span><span className="f-val carbon"><span className="clamp">{p ? p.lead.argument : "Finds conditions that fit only one supplier, and quotes the notice for each."}</span></span></div>
+              <div className="f-row"><span className="f-label">Severity</span><span className="f-val carbon">{p ? p.lead.severity[0].toUpperCase() + p.lead.severity.slice(1) : "—"}</span></div>
+              <span className="f-copy">Copy 2 · Prosecution</span>
+            </div>
+            <div className="ply ply-c">
+              <div className="f-head"><span>Form XS-3 · Original</span><span>{caseNo}</span></div>
+              <div className="f-row"><span className="f-label">Buyer</span><span className="f-val">{t ? clip(t.buyer_name ?? "Not published", 70) : "—"}</span></div>
+              <div className="f-row"><span className="f-label">Subject</span><span className="f-val" lang={t?.language ?? undefined}><span className="clamp">{t ? t.title : "Waiting for the first ruling"}</span></span></div>
+              <div className="f-row">
+                <span className="f-label">Exhibit</span>
+                <span className="f-val" lang={t?.language ?? undefined}>{p?.exhibit.quote ? <><span className="sticker p inline">P-{p.n(p.exhibit)}</span>“{clip(p.exhibit.quote, 120)}”</> : "—"}</span>
               </div>
-            </>
-          ) : (
-            <article className="sheet ov-excerpt-empty">
-              <p>No ruling has been entered yet.</p>
-              <p>Call a case and its record will appear here as the court’s latest page.</p>
-              <Link className="btn btn-ink" href={demoHref}><Gavel /> Watch a sample hearing</Link>
-            </article>
+              <div className="f-row">
+                <span className="f-label">Not in notice</span>
+                {p?.missing
+                  ? <span className="f-val ghost" lang={t?.language ?? undefined}>“{clip(p.missing.quote, 60)}” · no weight</span>
+                  : <span className="f-val">{p ? `None · ${p.found} of ${p.quoted} quotes found in the notice` : "—"}</span>}
+              </div>
+              <div className="f-row"><span className="f-label">Ruling</span><span className="f-val typing">{p ? <>{typed.shown}{!typed.done && <span className="caret" />}</> : "—"}</span></div>
+              <div className="f-row">
+                <span className="f-label">Risk</span>
+                {v ? <RiskBoxes level={v.risk_level} score={v.risk_score} typed /> : <span className="f-val">Awaiting the court</span>}
+              </div>
+              {trial?.letter && t && (
+                <Link className="tear" href={`/case/${t.id}`}>
+                  <small>Tear off here · letter to the buyer ({trial.letter.language.toUpperCase()})</small>
+                  <p lang={trial.letter.language}>{trial.letter.subject}</p>
+                </Link>
+              )}
+            </div>
+          </div>
+          <button type="button" className="fan-toggle" onClick={() => setFanned((f) => !f)} aria-pressed={fanned}>{fanned ? "Stack the copies" : "Fan out the copies"}</button>
+          {log.length > 0 && (
+            <div className="fanfold-slip" aria-label="Hearing log">
+              <ol className="fanfold">
+                {log.map((l, i) => <li key={i} className={l.ch}>{String(i + 1).padStart(3, "0")} {l.who.padEnd(5, " ")} {l.text}</li>)}
+              </ol>
+            </div>
           )}
         </div>
       </section>
 
-      <section className="ov-lists">
-        <article className="sheet list-sheet">
-          <header>
-            <h2>AWAITING A HEARING</h2>
-            <Link href="/docket?status=referred">All {groups.waiting.length}</Link>
-          </header>
-          {!tenders && <p className="list-empty">Reading the docket…</p>}
-          {tenders && groups.waiting.length === 0 && <p className="list-empty">Nothing awaits a hearing at this threshold.</p>}
-          <ol>
-            {groups.waiting.slice(0, 6).map((t) => (
-              <li key={t.id} className="case-row">
-                <div className="case-row-main">
-                  <span className="case-no">{t.source_id}{t.is_sample && <span className="sample">SAMPLE</span>}</span>
-                  <Link href={`/case/${t.id}`} className="case-title">{t.title}</Link>
-                  <span className="case-meta">{sourceLabel(t.source)} · {t.buyer_name ?? "Buyer not published"}</span>
-                  {t.screen?.signals[0] && <span className="case-why">Flagged for: {[...new Set(t.screen.signals.map((s) => humanCategory(s.category).toLowerCase()))].slice(0, 2).join(", ")}</span>}
-                </div>
-                <div className="case-row-side">
-                  <span className="score-chip" title="Screening score">{(t.screen_score ?? 0).toFixed(2)}</span>
-                  <Link className="btn btn-ghost btn-sm" href={`/case/${t.id}?call=1`}><Gavel /> Call</Link>
-                </div>
-              </li>
-            ))}
-          </ol>
-        </article>
-
-        <article className="sheet list-sheet">
-          <header>
-            <h2>RULINGS ENTERED</h2>
-            <Link href="/docket?status=ruled">All {groups.ruled.length}</Link>
-          </header>
-          {tenders && groups.ruled.length === 0 && <p className="list-empty">No rulings yet. The first hearing you call will be entered here.</p>}
-          <ol>
-            {groups.ruled.slice(0, 6).map((t) => (
-              <li key={t.id} className="case-row">
-                <div className="case-row-main">
-                  <span className="case-no">{t.source_id}{t.is_sample && <span className="sample">SAMPLE</span>}</span>
-                  <Link href={`/case/${t.id}`} className="case-title">{t.title}</Link>
-                  <span className="case-meta">{sourceLabel(t.source)} · {t.buyer_name ?? "Buyer not published"}</span>
-                </div>
-                <div className="case-row-side">
-                  <span className="stamp-mini court">{t.risk_level}</span>
-                  <span className="score-chip">{t.risk_score?.toFixed(2)}</span>
-                </div>
-              </li>
-            ))}
-          </ol>
-        </article>
-      </section>
-
-      <section className="ov-steps" aria-labelledby="how">
-        <h2 id="how">HOW A HEARING RUNS</h2>
-        <ol>
-          {STEPS.map((s, i) => (
-            <li key={i}>
-              <span className="step-n">{i + 1}</span>
-              <b>{s.who}</b>
-              <em>{s.what}</em>
-              <p>{s.how}</p>
+      <section className="band channels">
+        <div className="band-head">
+          <h2>Three copies. One record.</h2>
+          <p>Each party works on its own copy, with one job and one rule it cannot break. They file in this order, every time.</p>
+        </div>
+        <ol className="lanes">
+          {[
+            { ply: "p", copy: "Copy 2", name: "The prosecutor", job: "Finds conditions that fit only one supplier.", rule: "Must quote the notice word for word for every count." },
+            { ply: "d", copy: "Copy 3", name: "The defense", job: "Answers each count for the buyer.", rule: "Gives the most honest good reason, and concedes when there is none." },
+            { ply: "c", copy: "Original", name: "The court", job: "Weighs both copies and rules count by count.", rule: "Gives no weight to a quote that is not really in the notice." },
+          ].map((a) => (
+            <li key={a.ply} className={`lane ply-${a.ply}`}>
+              <div className="f-head"><span>Form XS-3</span><span>{a.copy}</span></div>
+              <h3>{a.name}</h3>
+              <p>{a.job}</p>
+              <p className="lane-rule"><b className="f-label">Rule</b>{a.rule}</p>
             </li>
           ))}
         </ol>
-        <p className="ov-fine">The tribunal identifies indicators for human review. It never finds a buyer guilty of anything.</p>
+        <Link className="band-link" href="/court">Watch them argue a real tender</Link>
+      </section>
+
+      <section className="band funnel-band">
+        <div className="band-head">
+          <h2>Cheap first. The court only when it matters.</h2>
+          <p>Free rules screen every tender. Only the ones with warning signs are worth an AI hearing.</p>
+        </div>
+        <div className="intake">
+          <div className="f-head" style={{ marginTop: 14 }}><span>Intake register</span><span>Tenders on file</span></div>
+          <ul className="funnel" aria-label="Tenders by stage">
+            {funnel.map((f) => (
+              <li key={f.label}>
+                <Link href={f.href} className={`funnel-row tone-${f.tone}`}>
+                  <span className="funnel-label">{f.label}</span>
+                  <span className="funnel-bar"><i style={{ width: `${Math.max(1.5, (f.n / max) * 100)}%` }} /></span>
+                  <b>{tenders ? f.n.toLocaleString("en-GB") : "…"}</b>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </section>
+
+      <section className="band verdicts-band">
+        <div className="band-head">
+          <h2>Latest rulings</h2>
+          <p>Real tenders, real rulings. Open any one to read the full argument.</p>
+        </div>
+        {tenders && groups.ruled.length === 0 && <p className="list-empty">No tender has been checked yet. The first one you check appears here.</p>}
+        {groups.ruled.length > 0 && (
+          <ul className="verdict-list ledger">
+            {groups.ruled.slice(0, 6).map((x) => (
+              <li key={x.id}>
+                <Link href={`/case/${x.id}`} className="verdict-row">
+                  <span className="mark-typed court"><i aria-hidden>X</i>{x.risk_level}</span>
+                  <span className="verdict-main">
+                    <b lang={x.language ?? undefined}>{x.title}</b>
+                    <small>{x.buyer_name ?? "Buyer not published"}</small>
+                  </span>
+                  <SourceTag t={x} />
+                  <span className="verdict-score">{x.risk_score?.toFixed(2)}</span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className="band sources-band">
+        <ul className="source-strip" aria-label="Where the tenders come from">
+          {[
+            { name: "TED", n: bySource("TED"), kind: "EU, official API" },
+            { name: "USAspending", n: bySource("USASPENDING"), kind: "US, official API" },
+            { name: "SAM.gov", n: bySource("SAM_GOV") + byHost("sam.gov"), kind: "US, by link" },
+            { name: "zakup.gov.kz", n: byHost("zakup.gov.kz"), kind: "Kazakhstan, public API" },
+            { name: "Other websites", n: bySource("WEB") - byHost("sam.gov") - byHost("zakup.gov.kz"), kind: "by link, read by AI", web: true },
+          ].map((s) => (
+            <li key={s.name} className={s.web ? "web" : undefined}><b>{s.name}</b><span>{tenders ? s.n.toLocaleString("en-GB") : "…"}</span><small>{s.kind}</small></li>
+          ))}
+        </ul>
+        <Link className="band-link" href="/how">How sources are read</Link>
+      </section>
+
+      <section className="close">
+        <h2>Open a case.</h2>
+        <p>Paste a link from any procurement site, or pick one the screening already flagged.</p>
+        <div className="hero-actions">
+          <button className="btn btn-primary btn-lg" onClick={() => requireUser(() => setAddOpen(true))}>Add a tender</button>
+          <Link className="btn btn-lg" href="/docket?status=referred">See what to check</Link>
+        </div>
+        <p className="close-fine">xscan points out warning signs for a person to review. It never says anyone is guilty.</p>
       </section>
     </div>
   );

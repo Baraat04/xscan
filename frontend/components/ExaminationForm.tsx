@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import type { Examination } from "@/lib/types";
-import { Alert } from "./Icons";
 
 const PROMPTS: Record<Examination["agent"], string[]> = {
   defense: ["What document would prove the brand requirement is justified?", "Is there any legitimate reason for the short deadline?"],
@@ -55,7 +54,7 @@ export function ExaminationForm({ trialId, onAnswer }: { trialId: string; onAnsw
       <div className="suggest">
         {PROMPTS[agent].map((p) => <button type="button" key={p} onClick={() => void ask(p)} disabled={busy}>{p}</button>)}
       </div>
-      {error && <p className="error-line" role="alert"><Alert width={16} /> {error}</p>}
+      {error && <p className="error-line" role="alert">{error}</p>}
     </form>
   );
 }

@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { z } from "zod";
 import { config, PROMPT_VERSION } from "../config.js";
 import { audit, db, uuid } from "../db/index.js";
-import type { NoticeSection } from "../adapters/base.js";
+import type { Jurisdiction, NoticeSection } from "../adapters/base.js";
 import { INJECTION_GUARD, structured, untrusted, type CallMetrics } from "./llm.js";
 import { verifyQuote } from "./quotes.js";
 
@@ -78,7 +78,7 @@ trialBus.setMaxListeners(200);
 const emit = (trialId: string, event: string, data: unknown) => trialBus.emit(trialId, { event, data });
 
 interface TenderRow {
-  id: string; source: string; source_id: string; jurisdiction: "EU" | "US"; title: string; buyer_name: string | null;
+  id: string; source: string; source_id: string; jurisdiction: Jurisdiction; title: string; buyer_name: string | null; buyer_country: string | null;
   language: string | null; estimated_value: string | null; currency: string | null; published_at: string | null;
   deadline_at: string | null; procedure_type: string | null; notice_type: string | null; cpv: string[]; naics: string | null;
   psc: string | null; sections: NoticeSection[]; screen: any; url: string | null;
@@ -86,7 +86,7 @@ interface TenderRow {
 
 function dossier(t: TenderRow) {
   const facts = [
-    `Source: ${t.source} ${t.source_id}`, `Jurisdiction: ${t.jurisdiction}`, `Buyer: ${t.buyer_name ?? "unknown"}`,
+    `Source: ${t.source} ${t.source_id}`, `Jurisdiction: ${t.jurisdiction}`, `Buyer: ${t.buyer_name ?? "unknown"}`, `Buyer country: ${t.buyer_country ?? "unknown"}`,
     `Notice language: ${t.language ?? "unknown"}`, `Notice type: ${t.notice_type ?? "unknown"}`, `Procedure: ${t.procedure_type ?? "unknown"}`,
     `Estimated value: ${t.estimated_value ? `${Number(t.estimated_value).toLocaleString("en-US")} ${t.currency ?? ""}` : "not published"}`,
     `Published: ${t.published_at ?? "unknown"}`, `Tender deadline: ${t.deadline_at ?? "unknown"}`,
@@ -97,22 +97,24 @@ function dossier(t: TenderRow) {
   return `${facts}\n\nAutomated screening signals (heuristic, may be wrong):\n${signals}\n\n${untrusted("notice", `# ${t.title}\n\n${body}`)}`;
 }
 
-const legal = (j: "EU" | "US") =>
-  j === "EU"
-    ? "Legal frame: EU public procurement (Directives 2014/24/EU, 2014/25/EU, 2014/23/EU) and national implementing rules. Distinguish EU-level rules from member-state rules; do not make definitive legal conclusions from an incomplete notice."
-    : "Legal frame: US federal procurement (FAR and agency supplements, e.g. FAR Part 6 competition, FAR 11.105 brand-name items, FAR 5.203 response times). Do not treat every FAR clause as applicable.";
+const LEGAL: Record<Jurisdiction, string> = {
+  EU: "Legal frame: EU public procurement (Directives 2014/24/EU, 2014/25/EU, 2014/23/EU) and national implementing rules. Distinguish EU-level rules from member-state rules; do not make definitive legal conclusions from an incomplete notice.",
+  US: "Legal frame: US federal procurement (FAR and agency supplements, e.g. FAR Part 6 competition, FAR 11.105 brand-name items, FAR 5.203 response times). Do not treat every FAR clause as applicable.",
+  OTHER: "Legal frame: the public procurement law of the buyer's country (see Buyer country in the case file) and principles shared by most systems: transparency, equal treatment, non-discrimination and proportionality (e.g. the UNCITRAL Model Law on Public Procurement, the WTO GPA where the country is a party). The notice was imported from a web page, so its text may be partial. Name a national law or article only when you are confident it exists, and mark it NEEDS_LEGAL_VERIFICATION.",
+};
+const legal = (j: Jurisdiction) => LEGAL[j] ?? LEGAL.OTHER;
 
-const PROSECUTOR = (j: "EU" | "US") => `You are THE PROSECUTOR in xscan's tender tribunal. Your job: find conditions in a public procurement notice that may tailor ("rig") the tender toward one supplier or restrict competition.
+const PROSECUTOR = (j: Jurisdiction) => `You are THE PROSECUTOR in xscan's tender tribunal. Your job: find conditions in a public procurement notice that may tailor ("rig") the tender toward one supplier or restrict competition.
 ${legal(j)}
 Rules: every charge must quote the notice verbatim, in its original language, copied exactly. Do not invent facts that are not in the notice. Prefer 2-5 strong charges over many weak ones. You argue indicators that need human review, never that anyone is corrupt.
 ${INJECTION_GUARD}`;
 
-const DEFENDER = (j: "EU" | "US") => `You are THE DEFENSE in xscan's tender tribunal. You represent the contracting authority. For each charge, give the most plausible honest, legitimate explanation a reasonable buyer could have (compatibility with installed equipment, safety, urgency, legal requirements, market structure). Concede when no legitimate reason is credible: an honest defense is what reduces false accusations.
+const DEFENDER = (j: Jurisdiction) => `You are THE DEFENSE in xscan's tender tribunal. You represent the contracting authority. For each charge, give the most plausible honest, legitimate explanation a reasonable buyer could have (compatibility with installed equipment, safety, urgency, legal requirements, market structure). Concede when no legitimate reason is credible: an honest defense is what reduces false accusations.
 ${legal(j)}
 Never invent facts not in the notice; you may say what evidence would prove your explanation.
 ${INJECTION_GUARD}`;
 
-const JUDGE = (j: "EU" | "US") => `You are THE COURT in xscan's tender tribunal. Weigh the prosecution against the defense, charge by charge, and rule. SUSTAINED: the indicator stands and the defense is weak. DISMISSED: the defense gives a convincing legitimate reason or the charge lacks evidence. REFER_FOR_CLARIFICATION: only the buyer can settle it.
+const JUDGE = (j: Jurisdiction) => `You are THE COURT in xscan's tender tribunal. Weigh the prosecution against the defense, charge by charge, and rule. SUSTAINED: the indicator stands and the defense is weak. DISMISSED: the defense gives a convincing legitimate reason or the charge lacks evidence. REFER_FOR_CLARIFICATION: only the buyer can settle it.
 Calibrate risk_score (0..1): one weak indicator is LOW; several sustained, independent indicators that together point to a single supplier are HIGH or CRITICAL. A charge whose quote is marked NOT_FOUND has no evidentiary weight.
 ${legal(j)}
 Never call a tender corrupt, fraudulent or illegal. Indicators for human review only.
@@ -183,11 +185,11 @@ export async function runTrial(trialId: string, tender: TenderRow) {
   }
 }
 
-export async function startTrial(tenderId: string) {
+export async function startTrial(tenderId: string, userId: string | null = null) {
   const tender = await db.one<TenderRow>("SELECT * FROM tenders WHERE id = $1", [tenderId]);
   if (!tender) return null;
   const id = uuid();
-  await db.query("INSERT INTO trials (id, tender_id, status, model, prompt_version) VALUES ($1,$2,'running',$3,$4)", [id, tenderId, config.meta.model, PROMPT_VERSION]);
+  await db.query("INSERT INTO trials (id, tender_id, status, model, prompt_version, user_id) VALUES ($1,$2,'running',$3,$4,$5)", [id, tenderId, config.meta.model, PROMPT_VERSION, userId]);
   await audit("trial.start", "trial", id, { tender: tenderId });
   void runTrial(id, tender);
   return id;

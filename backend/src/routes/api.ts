@@ -3,11 +3,15 @@ import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import { config } from "../config.js";
 import { db } from "../db/index.js";
-import { adapters, ingestBus, runIngestion } from "../services/ingest.js";
+import { currentUser, requireUser } from "../services/auth.js";
+import { adapters, ingestBus, isIngesting, runIngestion } from "../services/ingest.js";
+import { ImportError, importListing, importOne } from "../services/web.js";
+import { account } from "./account.js";
 import { DEFAULT_THRESHOLD, RULES_VERSION } from "../services/screen.js";
 import { examine, startTrial, trialBus } from "../services/tribunal.js";
 
 export const api = Router();
+api.use(account);
 
 const aiLimiter = rateLimit({ windowMs: 60_000, limit: 20, standardHeaders: "draft-8", legacyHeaders: false,
   message: { error: { code: "rate_limited", message: "Too many AI requests. Try again in a minute." } } });
@@ -42,9 +46,9 @@ api.get("/sources/status", async (_req, res) => {
 
 const ListQuery = z.object({
   q: z.string().max(200).optional(),
-  source: z.enum(["TED", "SAM_GOV", "USASPENDING"]).optional(),
-  jurisdiction: z.enum(["EU", "US"]).optional(),
-  limit: z.coerce.number().int().min(1).max(500).default(300),
+  source: z.enum(["TED", "SAM_GOV", "USASPENDING", "WEB"]).optional(),
+  jurisdiction: z.enum(["EU", "US", "OTHER"]).optional(),
+  limit: z.coerce.number().int().min(1).max(3000).default(1500),
 });
 
 api.get("/tenders", async (req, res) => {
@@ -56,11 +60,14 @@ api.get("/tenders", async (req, res) => {
   if (q) { params.push(q); where.push(`(t.search @@ plainto_tsquery('simple', $${params.length}) OR t.title ILIKE '%' || $${params.length} || '%' OR t.buyer_name ILIKE '%' || $${params.length} || '%')`); }
   if (source) { params.push(source); where.push(`t.source = $${params.length}`); }
   if (jurisdiction) { params.push(jurisdiction); where.push(`t.jurisdiction = $${params.length}`); }
+  params.push(currentUser(res)?.id ?? null);
+  const userParam = params.length;
   params.push(limit);
   const { rows } = await db.query(
     `SELECT t.id, t.source, t.source_id, t.is_sample, t.jurisdiction, t.url, t.title, t.language, t.buyer_name, t.buyer_country,
             t.notice_type, t.procedure_type, t.cpv, t.naics, t.psc, t.estimated_value, t.currency, t.published_at, t.deadline_at,
-            t.status, t.screen_score, t.screen, t.ingested_at,
+            t.status, t.screen_score, t.screen, t.ingested_at, (t.imported_by IS NOT NULL) AS imported,
+            EXISTS (SELECT 1 FROM saved_tenders s WHERE s.tender_id = t.id AND s.user_id = $${userParam}) AS saved,
             tr.id AS trial_id, tr.status AS trial_status, tr.risk_score, tr.risk_level
        FROM tenders t
        LEFT JOIN LATERAL (SELECT id, status, risk_score, risk_level FROM trials WHERE tender_id = t.id ORDER BY started_at DESC LIMIT 1) tr ON true
@@ -77,6 +84,8 @@ api.get("/tenders/:id", async (req, res) => {
   const tender = await db.one("SELECT * FROM tenders WHERE id = $1", [pid(req)]);
   if (!tender) return fail(res, 404, "not_found", "Tender not found");
   delete tender.search;
+  const user = currentUser(res);
+  tender.saved = user ? Boolean(await db.one("SELECT 1 FROM saved_tenders WHERE user_id = $1 AND tender_id = $2", [user.id, tender.id])) : false;
   const trials = await db.query("SELECT id, status, risk_score, risk_level, started_at, finished_at FROM trials WHERE tender_id = $1 ORDER BY started_at DESC", [pid(req)]);
   const buyer = tender.buyer_name
     ? await db.query(`SELECT t.id, t.title, t.screen_score, t.status, tr.risk_level FROM tenders t
@@ -86,12 +95,12 @@ api.get("/tenders/:id", async (req, res) => {
   res.json({ tender, trials: trials.rows, buyerHistory: buyer.rows });
 });
 
-api.post("/tenders/:id/trials", aiLimiter, async (req, res) => {
+api.post("/tenders/:id/trials", requireUser, aiLimiter, async (req, res) => {
   if (!config.meta.apiKey) return fail(res, 503, "llm_unconfigured", "META_API_KEY is not configured on the server");
   if (!isUuid(pid(req))) return fail(res, 404, "not_found", "Tender not found");
   const running = await db.one("SELECT id FROM trials WHERE tender_id = $1 AND status = 'running' AND started_at > now() - interval '5 minutes'", [pid(req)]);
   if (running) return res.status(202).json({ trialId: running.id, resumed: true });
-  const trialId = await startTrial(pid(req));
+  const trialId = await startTrial(pid(req), currentUser(res)!.id);
   if (!trialId) return fail(res, 404, "not_found", "Tender not found");
   res.status(202).json({ trialId, resumed: false });
 });
@@ -131,7 +140,7 @@ api.get("/trials/:id/events", async (req: Request<{ id: string }>, res) => {
 
 const ExamineBody = z.object({ agent: z.enum(["prosecutor", "defense", "court"]), question: z.string().trim().min(3).max(600) });
 
-api.post("/trials/:id/examine", aiLimiter, async (req, res) => {
+api.post("/trials/:id/examine", requireUser, aiLimiter, async (req, res) => {
   const body = ExamineBody.safeParse(req.body);
   if (!body.success) return fail(res, 400, "invalid_body", body.error.issues[0].message);
   if (!isUuid(pid(req))) return fail(res, 404, "not_found", "Trial not found");
@@ -144,20 +153,66 @@ api.post("/trials/:id/examine", aiLimiter, async (req, res) => {
   }
 });
 
-api.post("/ingest", async (_req, res) => {
-  void runIngestion().catch((e) => console.error("[ingest]", e));
-  res.status(202).json({ started: true });
+const IngestBody = z.object({
+  target: z.coerce.number().int().min(1, "Ask for at least 1 tender.").max(2000, "At most 2000 tenders per update.").default(120),
+  sources: z.array(z.enum(["TED", "SAM_GOV", "USASPENDING"])).min(1, "Pick at least one source.").optional(),
+});
+
+api.post("/ingest", requireUser, async (req, res) => {
+  const body = IngestBody.safeParse(req.body ?? {});
+  if (!body.success) return fail(res, 400, "invalid_body", body.error.issues[0].message);
+  if (isIngesting()) return fail(res, 409, "busy", "An update is already running. Wait for it to finish.");
+  void runIngestion({ ...body.data, userId: currentUser(res)!.id }).catch((e) => console.error("[ingest]", e));
+  res.status(202).json({ started: true, target: body.data.target });
+});
+
+const importFail = (res: Response, e: unknown) =>
+  e instanceof ImportError ? fail(res, 422, e.code, e.message) : fail(res, 502, "import_failed", `Import failed: ${(e as Error).message}`);
+
+const OneBody = z.object({
+  url: z.string().trim().max(2000).optional().transform((v) => v || undefined),
+  text: z.string().max(200_000).optional().transform((v) => v?.trim() || undefined),
+}).refine((b) => b.url || b.text, "Paste a link or the tender text.");
+
+api.post("/import/one", requireUser, aiLimiter, async (req, res) => {
+  if (!config.meta.apiKey) return fail(res, 503, "llm_unconfigured", "META_API_KEY is not configured on the server");
+  const body = OneBody.safeParse(req.body);
+  if (!body.success) return fail(res, 400, "invalid_body", body.error.issues[0].message);
+  try {
+    res.status(201).json(await importOne(body.data, currentUser(res)!.id));
+  } catch (e) {
+    importFail(res, e);
+  }
+});
+
+const ListingBody = z.object({
+  url: z.string().trim().min(1, "Paste the link to the page with tenders.").max(2000),
+  max: z.coerce.number().int().min(1).max(30, "At most 30 tenders per page.").default(10),
+});
+
+api.post("/import/listing", requireUser, aiLimiter, async (req, res) => {
+  if (!config.meta.apiKey) return fail(res, 503, "llm_unconfigured", "META_API_KEY is not configured on the server");
+  const body = ListingBody.safeParse(req.body);
+  if (!body.success) return fail(res, 400, "invalid_body", body.error.issues[0].message);
+  try {
+    res.status(202).json(await importListing(body.data.url, body.data.max, currentUser(res)!.id));
+  } catch (e) {
+    importFail(res, e);
+  }
 });
 
 api.get("/ingest/events", (req, res) => {
   const stream = sse(res);
   const onJob = (j: unknown) => stream.send("job", j);
   const onRecord = (r: unknown) => stream.send("record", r);
+  const onRun = (r: unknown) => stream.send("run", r);
   ingestBus.on("job", onJob);
   ingestBus.on("record", onRecord);
+  ingestBus.on("run", onRun);
   req.on("close", () => {
     ingestBus.off("job", onJob);
     ingestBus.off("record", onRecord);
+    ingestBus.off("run", onRun);
     stream.close();
   });
 });

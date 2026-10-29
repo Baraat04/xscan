@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { LANGUAGE } from "@/lib/format";
 import type { Letter, Tender } from "@/lib/types";
-import { Check, Copy, Download, Mail } from "./Icons";
 
 export function LetterSheet({ letter, tender }: { letter: Letter; tender: Tender }) {
   const bilingual = letter.language !== "en" && letter.body_en && letter.body_en !== letter.body;
@@ -44,9 +43,9 @@ export function LetterSheet({ letter, tender }: { letter: Letter; tender: Tender
       <p className="letter-subject" lang={lang === "orig" ? letter.language : "en"}>{subject}</p>
       <div className="letter-body" lang={lang === "orig" ? letter.language : "en"}>{body}</div>
       <div className="letter-foot">
-        <button className="btn btn-ink" onClick={copy}>{copied ? <Check /> : <Copy />}{copied ? "Copied" : "Copy letter"}</button>
-        <button className="btn btn-paper" onClick={download}><Download /> Download .txt</button>
-        <a className="btn btn-ghost" href={`mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`}><Mail /> Open in mail</a>
+        <button className="btn btn-ink" onClick={copy}>{copied ? "Copied" : "Copy letter"}</button>
+        <button className="btn btn-paper" onClick={download}>Download .txt</button>
+        <a className="btn btn-ghost" href={`mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`}>Open in mail</a>
         <p>Drafted by the Clerk. Send it through the channel the procurement documents name, before the deadline for questions.</p>
       </div>
     </article>

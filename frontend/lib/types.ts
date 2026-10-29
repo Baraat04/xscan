@@ -1,4 +1,11 @@
-export type Source = "TED" | "SAM_GOV" | "USASPENDING";
+export type Source = "TED" | "SAM_GOV" | "USASPENDING" | "WEB";
+export type Jurisdiction = "EU" | "US" | "OTHER";
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+}
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 export type QuoteStatus = "VERIFIED" | "APPROXIMATE" | "NOT_FOUND";
 
@@ -16,7 +23,7 @@ export interface TenderSummary {
   source: Source;
   source_id: string;
   is_sample: boolean;
-  jurisdiction: "EU" | "US";
+  jurisdiction: Jurisdiction;
   url: string | null;
   title: string;
   language: string | null;
@@ -38,6 +45,10 @@ export interface TenderSummary {
   trial_status: "running" | "complete" | "failed" | null;
   risk_score: number | null;
   risk_level: RiskLevel | null;
+  /** Added by a user from a link, not collected from an official API. */
+  imported: boolean;
+  /** Saved by the signed-in user. Always false when signed out. */
+  saved: boolean;
 }
 
 export interface NoticeSection {

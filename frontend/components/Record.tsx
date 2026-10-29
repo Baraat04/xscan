@@ -2,7 +2,6 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { Check } from "./Icons";
 import { LINES_PER_PAGE, layout, paginate, type Block, type ExhibitMark, type Line } from "@/lib/transcript";
 
 const CHARS_PER_SECOND = 1400;
@@ -139,7 +138,7 @@ export function Record({
                   {l.exhibit && (l as { partial?: number }).partial === undefined && (
                     <button className={`sticker ${l.exhibit.side}${l.exhibit.status === "NOT_FOUND" ? " nf" : ""}`} onClick={() => onExhibit(l.exhibit!)} title={`Show exhibit ${l.exhibit.id} in the notice`}>
                       {l.exhibit.id}
-                      {l.exhibit.status === "VERIFIED" ? <Check width={12} height={12} aria-label="verified" /> : <small>{l.exhibit.status === "APPROXIMATE" ? "APPROX" : "NOT FOUND"}</small>}
+                      {l.exhibit.status !== "VERIFIED" && <small>{l.exhibit.status === "APPROXIMATE" ? "APPROX" : "NOT FOUND"}</small>}
                     </button>
                   )}
                 </div>

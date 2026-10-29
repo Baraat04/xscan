@@ -97,23 +97,34 @@ export class UsaSpendingAdapter extends BaseProcurementAdapter {
     return { source: this.source, label: "USAspending.gov — federal awards (US)", enabled: true, docs: "https://api.usaspending.gov/docs/endpoints" };
   }
 
-  async *fetchRecords({ since, limit = 25 }: FetchOptions) {
-    const from = since ?? new Date(Date.now() - 21 * 86400000);
-    const body = await fetchJson("https://api.usaspending.gov/api/v2/search/spending_by_award/", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        filters: {
-          award_type_codes: ["A", "B", "C", "D"],
-          time_period: [{ start_date: from.toISOString().slice(0, 10), end_date: new Date().toISOString().slice(0, 10) }],
-          extent_competed_type_codes: ["B", "C", "G", "NDO"],
-        },
-        fields: ["Award ID", "Recipient Name", "Award Amount", "Description", "Awarding Agency", "Awarding Sub Agency",
-          "Start Date", "End Date", "NAICS", "PSC", "Place of Performance State Code", "generated_internal_id"],
-        limit: Math.min(limit, 100), page: 1, sort: "Award Amount", order: "desc",
-      }),
-    });
-    for (const r of body.results ?? []) yield r;
+  async *fetchRecords({ since, limit = 300 }: FetchOptions) {
+    const from = since ?? new Date(Date.now() - 120 * 86400000);
+    let page = 1;
+    let yielded = 0;
+    while (yielded < limit) {
+      const body = await fetchJson("https://api.usaspending.gov/api/v2/search/spending_by_award/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filters: {
+            award_type_codes: ["A", "B", "C", "D"],
+            time_period: [{ start_date: from.toISOString().slice(0, 10), end_date: new Date().toISOString().slice(0, 10) }],
+            extent_competed_type_codes: ["B", "C", "G", "NDO"],
+          },
+          fields: ["Award ID", "Recipient Name", "Award Amount", "Description", "Awarding Agency", "Awarding Sub Agency",
+            "Start Date", "End Date", "NAICS", "PSC", "Place of Performance State Code", "generated_internal_id"],
+          limit: 100, page, sort: "Start Date", order: "desc",
+        }),
+      });
+      const results: any[] = body.results ?? [];
+      for (const r of results) {
+        if (yielded >= limit) return;
+        yielded++;
+        yield r;
+      }
+      if (!body.page_metadata?.hasNext || !results.length) return;
+      page++;
+    }
   }
 
   getSourceIdentifier(raw: Record<string, any>) {

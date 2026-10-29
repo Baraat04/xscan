@@ -4,24 +4,29 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { API, api, ApiError } from "@/lib/api";
-import { date, daysUntil, humanCategory, LANGUAGE, money, sourceLabel } from "@/lib/format";
+import { date, daysUntil, humanCategory, LANGUAGE, money, origin } from "@/lib/format";
 import { buildRecord, PENDING } from "@/lib/record";
 import type { ExhibitMark } from "@/lib/transcript";
 import type { Charge, Examination, Rebuttal, Ruling, Tender, Trial } from "@/lib/types";
-import { Alert, Back, Check, Close, External, Gavel, Replay } from "./Icons";
+import { Close } from "./Icons";
 import { LetterSheet } from "./LetterSheet";
 import { Record } from "./Record";
 import { classify, useStore } from "./Store";
 import { ExaminationForm } from "./ExaminationForm";
+import { RiskBoxes, SaveButton, SourceTag } from "./Bits";
 
 type Stage = "prosecution" | "defense" | "verdict" | "letter";
 type Tab = "summary" | "transcript" | "notice" | "letter";
 
+const COUNTRY: Record<string, string> = {
+  KAZ: "Kazakhstan", GBR: "United Kingdom", RUS: "Russia", UKR: "Ukraine", UZB: "Uzbekistan", KGZ: "Kyrgyzstan", TUR: "Turkey", GEO: "Georgia",
+  ARM: "Armenia", AZE: "Azerbaijan", NOR: "Norway", CHE: "Switzerland", CAN: "Canada", AUS: "Australia", IND: "India", BLR: "Belarus",
+};
 const RULED: Record<Ruling["ruling"], string> = { SUSTAINED: "Sustained", DISMISSED: "Dismissed", REFER_FOR_CLARIFICATION: "Referred to the buyer" };
 const STANCE: Record<Rebuttal["stance"], string> = { contest: "Contests", partially_concede: "Concedes in part", concede: "Concedes" };
 
 export function CaseView({ id, autoCall = false }: { id: string; autoCall?: boolean }) {
-  const { refresh, threshold, tenders } = useStore();
+  const { refresh, threshold, tenders, user, requireUser } = useStore();
   const router = useRouter();
   const [tender, setTender] = useState<Tender | null>(null);
   const [buyerHistory, setBuyerHistory] = useState<{ id: string; title: string; risk_level: string | null }[]>([]);
@@ -136,13 +141,16 @@ export function CaseView({ id, autoCall = false }: { id: string; autoCall?: bool
     }
   }, [tender, listen, refresh]);
 
-  // "?call=1" from the overview or docket starts the hearing once, then leaves the URL clean.
+  // "?call=1" from the overview, the list or an import starts the check once, then leaves the URL clean.
+  // Signed-out visitors just see the tender; the check button sends them to sign in.
   useEffect(() => {
-    if (!autoCall || !loaded || autoCalled.current) return;
+    if (!autoCall || !loaded || autoCalled.current || user === undefined) return;
     autoCalled.current = true;
     router.replace(`/case/${id}`, { scroll: false });
-    if (!trial) void callCase();
-  }, [autoCall, loaded, trial, callCase, router, id]);
+    if (!trial && user) void callCase();
+  }, [autoCall, loaded, trial, callCase, router, id, user]);
+
+  const check = useCallback(() => requireUser(() => void callCase()), [requireUser, callCase]);
 
   const blocks = useMemo(() => (tender ? buildRecord(tender, trial, exams) : []), [tender, trial, exams]);
 
@@ -163,8 +171,8 @@ export function CaseView({ id, autoCall = false }: { id: string; autoCall?: bool
     return (
       <div className="page case-page">
         <article className="sheet case-msg">
-          <p className="error-line"><Alert /> {error}</p>
-          <Link className="btn btn-paper" href="/docket">Back to the docket</Link>
+          <p className="error-line">{error}</p>
+          <Link className="btn btn-paper" href="/docket">Back to tenders</Link>
         </article>
       </div>
     );
@@ -186,10 +194,14 @@ export function CaseView({ id, autoCall = false }: { id: string; autoCall?: bool
   const referred = (tender.screen_score ?? 0) >= threshold;
   const v = trial?.verdict;
   const lang = LANGUAGE[tender.language ?? ""] ?? tender.language ?? "unknown language";
+  const from = origin(tender);
+  const region = tender.jurisdiction === "EU" ? "European Union" : tender.jurisdiction === "US" ? "United States" : COUNTRY[tender.buyer_country ?? ""] ?? tender.buyer_country ?? "Country not stated";
+  // The list's flag moves the moment someone saves, so prefer it over the copy loaded with the page.
+  const savedNow = tenders?.find((x) => x.id === tender.id)?.saved ?? tender.saved;
 
   const caption = (
     <header className="caption">
-      <p className="caption-court">XSCAN TENDER TRIBUNAL · {tender.jurisdiction === "EU" ? "EUROPEAN UNION" : "UNITED STATES"}</p>
+      <p className="caption-court">XSCAN TENDER TRIBUNAL · {region.toUpperCase()}</p>
       <div className="caption-grid">
         <div className="caption-parties">
           IN THE MATTER OF:
@@ -200,7 +212,7 @@ export function CaseView({ id, autoCall = false }: { id: string; autoCall?: bool
         <div className="caption-bracket" aria-hidden>{")\n".repeat(6)}</div>
         <dl className="caption-case">
           <dt>Notice</dt>
-          <dd>{sourceLabel(tender.source)} {tender.source_id}</dd>
+          <dd>{tender.source === "WEB" ? from.site : `${from.site} ${tender.source_id}`}</dd>
           <dt>Language</dt>
           <dd>{lang}</dd>
         </dl>
@@ -212,23 +224,23 @@ export function CaseView({ id, autoCall = false }: { id: string; autoCall?: bool
   return (
     <div className="page case-page">
       <nav className="crumbs" aria-label="Breadcrumb">
-        <Link href="/docket" className="crumb-back"><Back /> Docket</Link>
+        <Link href="/docket" className="crumb-back">Tenders</Link>
         <span className="crumb-sep">/</span>
-        <span className="crumb-here">{tender.source_id}</span>
+        <span className="crumb-here">{tender.source === "WEB" ? from.site : tender.source_id}</span>
         <span className="crumb-nav">
-          {neighbours.prev && <Link href={`/case/${neighbours.prev.id}`} title={neighbours.prev.title}>Previous case</Link>}
-          {neighbours.next && <Link href={`/case/${neighbours.next.id}`} title={neighbours.next.title}>Next case</Link>}
+          {neighbours.prev && <Link href={`/case/${neighbours.prev.id}`} title={neighbours.prev.title}>Previous</Link>}
+          {neighbours.next && <Link href={`/case/${neighbours.next.id}`} title={neighbours.next.title}>Next tender</Link>}
         </span>
       </nav>
 
       <article className="sheet case-head">
         <div className="ch-grid">
           <div className="ch-main">
-            <p className="ch-court">
-              {sourceLabel(tender.source)} · {tender.jurisdiction === "EU" ? "European Union" : "United States"} · notice in {lang}
-              {tender.url && <> · <a href={tender.url} target="_blank" rel="noreferrer">original notice <External width={13} height={13} /></a></>}
-            </p>
             <h1 lang={tender.language ?? undefined}>{tender.title}</h1>
+            <div className="ch-source">
+              <SourceTag t={tender} link />
+              <span>{region} · in {lang}</span>
+            </div>
             <p className="ch-buyer">
               Issued by <b>{tender.buyer_name ?? "an unnamed buyer"}</b>
               {tender.is_sample && <span className="sample-note">Synthetic sample notice. The buyer is fictional.</span>}
@@ -249,29 +261,27 @@ export function CaseView({ id, autoCall = false }: { id: string; autoCall?: bool
 
           <div className="ch-side">
             {v ? (
-              <div className={`stamp${stamped ? " press" : ""}`} aria-label={`Risk ${v.risk_level}, ${v.risk_score.toFixed(2)}`}>
-                <b>{v.risk_level}</b>
-                <span>RISK {v.risk_score.toFixed(2)}{v.human_review_required ? " · REVIEW" : ""}</span>
-              </div>
+              <RiskBoxes key={stamped ? "typed" : "still"} level={v.risk_level} score={v.risk_score} review={v.human_review_required} typed={stamped} />
             ) : running ? (
-              <span className="state-mark live"><i /> In session</span>
+              <span className="state-mark live"><i /> Checking now</span>
             ) : (
-              <span className={`state-mark ${referred ? "ref" : "off"}`}>{referred ? "Referred by screening" : "Cleared at screening"}</span>
+              <span className={`state-mark ${referred ? "ref" : "off"}`}>{referred ? "Warning signs found" : "Looks normal"}</span>
             )}
             <div className="ch-actions">
-              {!trial && <button className="btn btn-ink btn-lg" onClick={callCase} disabled={calling}><Gavel /> {calling ? "Calling the case…" : "Call the case"}</button>}
-              {failed && <button className="btn btn-ink btn-lg" onClick={callCase} disabled={calling}><Gavel /> Call the case again</button>}
+              {!trial && <button className="btn btn-ink btn-lg" onClick={check} disabled={calling}>{calling ? "Starting…" : "Check with AI"}</button>}
+              {failed && <button className="btn btn-ink btn-lg" onClick={check} disabled={calling}>Try the check again</button>}
               {complete && (
                 <>
-                  <button className="btn btn-paper" onClick={() => { setTab("transcript"); setAnimate(true); setStamped(true); setReplayKey((k) => k + 1); }}><Replay /> Replay the hearing</button>
-                  <button className="btn btn-ghost" onClick={callCase} disabled={calling}><Gavel /> Rehear</button>
+                  <button className="btn btn-paper" onClick={() => { setTab("transcript"); setAnimate(true); setStamped(true); setReplayKey((k) => k + 1); }}>Replay</button>
+                  <button className="btn btn-ghost" onClick={check} disabled={calling}>Check again</button>
                 </>
               )}
+              <SaveButton id={tender.id} saved={savedNow} label />
             </div>
-            {!trial && <p className="ch-note">{referred ? "Three agents argue it, about a minute." : "Screening found nothing serious. You can still call it."}</p>}
+            {!trial && <p className="ch-note">{referred ? "A prosecutor, a defense and a court argue it. About a minute." : "Screening found nothing serious. You can still check it."}</p>}
           </div>
         </div>
-        {error && <p className="error-line" role="alert" style={{ marginTop: 14 }}><Alert width={16} /> {error}</p>}
+        {error && <p className="error-line" role="alert" style={{ marginTop: 14 }}>{error}</p>}
         <Stepper tender={tender} trial={trial} stage={stage} onJump={jump} />
       </article>
 
@@ -295,7 +305,7 @@ export function CaseView({ id, autoCall = false }: { id: string; autoCall?: bool
           {tab === "summary" && (
             <Summary
               tender={tender} trial={trial} referred={referred} buyerHistory={buyerHistory}
-              onCall={callCase} calling={calling} onExhibit={setExhibit} onJump={jump}
+              onCall={check} calling={calling} onExhibit={setExhibit} onJump={jump}
             />
           )}
           {tab === "transcript" && (
@@ -317,7 +327,7 @@ export function CaseView({ id, autoCall = false }: { id: string; autoCall?: bool
               {!trial && (
                 <article className="sheet case-msg">
                   <p>The record opens when the case is called. Until then it holds only the clerk’s screening note.</p>
-                  <button className="btn btn-ink" onClick={callCase} disabled={calling}><Gavel /> Call the case</button>
+                  <button className="btn btn-ink" onClick={check} disabled={calling}>Check with AI</button>
                 </article>
               )}
             </div>
@@ -368,7 +378,7 @@ function Stepper({ tender, trial, stage, onJump }: { tender: Tender; trial: Tria
         const state = failed ? "failed" : s.done ? "done" : active ? "active" : "todo";
         const body: ReactNode = (
           <>
-            <span className="st-mark" aria-hidden>{state === "done" ? <Check /> : state === "failed" ? <Alert /> : null}</span>
+            <span className="st-mark" aria-hidden />
             <span className="st-text">
               <b>{s.label}</b>
               <small>
@@ -418,22 +428,22 @@ function Summary({ tender, trial, referred, buyerHistory, onCall, calling, onExh
               ))}
             </ol>
           )}
-          <p className="sum-fine">Screening is a set of fixed rules ({tender.screen?.rulesVersion ?? "current"}). It can be wrong in both directions; that is what the hearing is for.</p>
+          <p className="sum-fine">Screening is a set of fixed rules ({tender.screen?.rulesVersion ?? "current"}). It can be wrong in both directions; that is what the AI check is for.</p>
         </article>
         <aside className="sheet sum-sheet sum-side">
-          <h2 className="sum-h">If you call the case</h2>
+          <h2 className="sum-h">What the AI check does</h2>
           <ol className="mini-steps">
             <li><b>The prosecutor</b> reads the notice and brings counts, each quoting the notice word for word.</li>
             <li><b>The defense</b> answers each count for the buyer, and concedes when there is no good reason.</li>
             <li><b>The court</b> rules count by count and sets a risk level. The clerk drafts a letter to the buyer.</li>
           </ol>
-          <button className="btn btn-ink btn-lg" onClick={onCall} disabled={calling}><Gavel /> {calling ? "Calling the case…" : "Call the case"}</button>
-          <p className="sum-fine">{referred ? "Referred by screening." : "Cleared at screening, but you can still hear it."} About a minute.</p>
+          <button className="btn btn-ink btn-lg" onClick={onCall} disabled={calling}>{calling ? "Starting…" : "Check with AI"}</button>
+          <p className="sum-fine">{referred ? "Screening found warning signs." : "Screening found nothing serious, but you can still check it."} About a minute.</p>
           {buyerHistory.length > 0 && (
             <>
               <h3 className="sum-h3">Other notices from this buyer</h3>
               <ul className="buyer-list">
-                {buyerHistory.map((b) => <li key={b.id}><Link href={`/case/${b.id}`}>{b.title}</Link>{b.risk_level && <span className="stamp-mini court">{b.risk_level}</span>}</li>)}
+                {buyerHistory.map((b) => <li key={b.id}><Link href={`/case/${b.id}`}>{b.title}</Link>{b.risk_level && <span className="mark-typed court"><i aria-hidden>X</i>{b.risk_level}</span>}</li>)}
               </ul>
             </>
           )}
@@ -472,7 +482,7 @@ function Summary({ tender, trial, referred, buyerHistory, onCall, calling, onExh
             <p>{v.recommendation}</p>
           </div>
           {p.injection_detected && (
-            <p className="inject-note"><Alert width={16} /> The notice contains text addressed to automated reviewers. It was entered as evidence and not obeyed.</p>
+            <p className="inject-note">The notice contains text addressed to automated reviewers. It was entered as evidence and not obeyed.</p>
           )}
         </article>
 
@@ -590,7 +600,7 @@ function AnnotatedNotice({ tender, trial, onExhibit }: { tender: Tender; trial: 
           {marks.length ? <>Passages quoted in the hearing are marked: <span className="sticker p inline">P</span> prosecution, <span className="sticker d inline">D</span> defense.</> : "Passages quoted in the hearing will be marked here once the case is heard."}
           {" "}The text stays in its original language.
         </p>
-        {tender.url && <a className="btn btn-paper" href={tender.url} target="_blank" rel="noreferrer"><External /> Open on {sourceLabel(tender.source)}</a>}
+        {tender.url && <a className="btn btn-paper" href={tender.url} target="_blank" rel="noreferrer">Open on {origin(tender).site}</a>}
       </header>
       {tender.sections.map((s) => {
         const here = marks.filter((m) => m.sectionKey === s.key && m.end > m.start).sort((a, b) => a.start - b.start);
@@ -638,7 +648,7 @@ function ExhibitPanel({ tender, exhibit: ex, onClose }: { tender: Tender; exhibi
         <button className="btn btn-ghost" onClick={onClose} aria-label="Close exhibit"><Close /></button>
       </div>
       <div className={`verif ${ex.status === "NOT_FOUND" ? "nf" : "ok"}`}>
-        {ex.status === "NOT_FOUND" ? <Alert /> : <Check />}
+        
         {ex.status === "VERIFIED" && "Quoted text found verbatim in the notice."}
         {ex.status === "APPROXIMATE" && "Close match in the notice; wording differs slightly."}
         {ex.status === "NOT_FOUND" && "This quote does not appear in the notice. The court gave it no weight."}

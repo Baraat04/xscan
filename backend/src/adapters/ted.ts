@@ -39,28 +39,34 @@ export class TedAdapter extends BaseProcurementAdapter {
     return { source: this.source, label: "TED — Tenders Electronic Daily (EU)", enabled: true, docs: "https://docs.ted.europa.eu/api/latest/index.html" };
   }
 
-  async *fetchRecords({ since, limit = 40 }: FetchOptions) {
-    const from = since ?? new Date(Date.now() - 4 * 86400000);
+  /**
+   * Two phases, because TED is slow to return full notices: page through publication numbers only (newest
+   * first), then fetch full fields just for the numbers the caller doesn't already have.
+   */
+  async *fetchRecords({ since, limit = 500, isKnown }: FetchOptions) {
+    const from = since ?? new Date(Date.now() - 45 * 86400000);
     const ymd = from.toISOString().slice(0, 10).replaceAll("-", "");
-    const pageSize = Math.min(limit, 50);
-    let page = 1;
-    let yielded = 0;
-    while (yielded < limit) {
-      const body = await fetchJson(API, {
+    const search = (query: string, fields: string[], page: number, size: number) =>
+      fetchJson(API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query: `publication-date>=${ymd} AND notice-type IN (cn-standard cn-social cn-desg)`,
-          fields: FIELDS, page, limit: pageSize, scope: "ACTIVE", paginationMode: "PAGE_NUMBER",
-        }),
+        body: JSON.stringify({ query, fields, page, limit: size, scope: "ACTIVE", paginationMode: "PAGE_NUMBER" }),
+        timeoutMs: 40000,
       });
-      const notices: any[] = body.notices ?? [];
-      for (const n of notices) {
-        if (yielded >= limit) return;
-        yielded++;
-        yield n;
+    let page = 1;
+    let scanned = 0;
+    while (scanned < limit) {
+      const ids = await search(`publication-date>=${ymd} AND notice-type IN (cn-standard cn-social cn-desg) SORT BY publication-number DESC`, ["publication-number"], page, 250);
+      const numbers: string[] = (ids.notices ?? []).map((n: any) => String(n["publication-number"]));
+      scanned += numbers.length;
+      const fresh: string[] = [];
+      for (const n of numbers) if (!(await isKnown?.(n))) fresh.push(n);
+      for (let i = 0; i < fresh.length; i += 25) {
+        const chunk = fresh.slice(i, i + 25);
+        const body = await search(`publication-number IN (${chunk.join(" ")})`, FIELDS, 1, chunk.length);
+        yield* body.notices ?? [];
       }
-      if (notices.length < pageSize) return;
+      if (numbers.length < 250) return;
       page++;
     }
   }
