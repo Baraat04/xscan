@@ -8,6 +8,7 @@ import { api } from "@/lib/api";
 import type { TenderSummary, Trial } from "@/lib/types";
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n).replace(/\s+\S*$/, "")}…` : s);
+const words = (code: string) => code[0] + code.slice(1).toLowerCase().replaceAll("_", " ");
 const RULING_WORD = { SUSTAINED: "sustained", DISMISSED: "dismissed", REFER_FOR_CLARIFICATION: "ask the buyer" } as const;
 const STANCE_WORD = { contest: "Contests", partially_concede: "Concedes in part", concede: "Concedes" } as const;
 const NOT_HEARD = "Not heard yet";
@@ -152,7 +153,7 @@ export default function OverviewPage() {
             <div className="ply ply-d" aria-hidden={!fanned}>
               <div className="f-head"><span>Form XS-3 · Copy 3</span><span>{caseNo}</span></div>
               <div className="ply-body" key={t?.id}>
-                <div className="f-row"><span className="f-label">Count</span><span className="f-val carbon">{p ? `${p.exhibit.id} · ${p.exhibit.title}` : top ? top.category : "—"}</span></div>
+                <div className="f-row"><span className="f-label">Count</span><span className="f-val carbon">{p ? `${p.exhibit.id} · ${p.exhibit.title}` : top ? words(top.category) : "—"}</span></div>
                 <div className="f-row"><span className="f-label">Defense answer</span><span className="f-val carbon"><span className="clamp">{p?.answer ? p.answer.explanation : "Gives the most honest good reason the buyer could have."}</span></span></div>
                 <div className="f-row"><span className="f-label">Position</span><span className="f-val carbon">{p?.answer ? STANCE_WORD[p.answer.stance] : t ? NOT_HEARD : "—"}</span></div>
               </div>
@@ -161,7 +162,7 @@ export default function OverviewPage() {
             <div className="ply ply-p" aria-hidden={!fanned}>
               <div className="f-head"><span>Form XS-3 · Copy 2</span><span>{caseNo}</span></div>
               <div className="ply-body" key={t?.id}>
-                <div className="f-row"><span className="f-label">Count</span><span className="f-val carbon">{p ? `${p.lead.id} · ${p.lead.title}` : top ? top.category : "—"}</span></div>
+                <div className="f-row"><span className="f-label">Count</span><span className="f-val carbon">{p ? `${p.lead.id} · ${p.lead.title}` : top ? words(top.category) : "—"}</span></div>
                 <div className="f-row"><span className="f-label">Argument</span><span className="f-val carbon"><span className="clamp">{p ? p.lead.argument : top ? top.note : "Finds conditions that fit only one supplier, and quotes the notice for each."}</span></span></div>
                 <div className="f-row"><span className="f-label">Severity</span><span className="f-val carbon">{p ? p.lead.severity[0].toUpperCase() + p.lead.severity.slice(1) : t ? NOT_HEARD : "—"}</span></div>
               </div>
