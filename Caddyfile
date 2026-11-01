@@ -1,0 +1,11 @@
+# SITE_ADDRESSES lists the domain and the server's plain http address. Caddy gets and renews the
+# certificate for the domain by itself as soon as the domain's DNS points at this server.
+{$SITE_ADDRESSES} {
+	encode gzip
+	handle /api/* {
+		reverse_proxy backend:4000
+	}
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

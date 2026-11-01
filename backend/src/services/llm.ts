@@ -86,6 +86,10 @@ export async function structured<T extends z.ZodType>(opts: {
       if (!res.ok) {
         const retryable = res.status === 429 || res.status >= 500;
         const text = (await res.text()).slice(0, 300);
+        // Meta answers this way both for a wrong model name and for a server address it does not serve.
+        if (text.includes("model_not_found")) {
+          throw new LLMError(`The Meta API does not offer the model ${model} to this server. Either the model name is wrong or Meta does not allow access from the server's address.`, false, res.status);
+        }
         throw new LLMError(`Meta API ${res.status}: ${text}`, retryable, res.status);
       }
       const body: any = await res.json();

@@ -41,21 +41,22 @@ function readCookie(req: Request, name: string) {
   return null;
 }
 
-function cookieAttrs(maxAgeSec: number) {
-  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+function cookieAttrs(res: Response, maxAgeSec: number) {
+  // Follows the request, so the cookie is Secure on https and sign-in still works on plain http.
+  const secure = res.req.secure ? "; Secure" : "";
   return `Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}${secure}`;
 }
 
 export async function startSession(res: Response, userId: string) {
   const token = randomBytes(32).toString("base64url");
   await db.query("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + $3::interval)", [tokenHash(token), userId, `${SESSION_DAYS} days`]);
-  res.setHeader("Set-Cookie", `${SESSION_COOKIE}=${token}; ${cookieAttrs(SESSION_DAYS * 86400)}`);
+  res.setHeader("Set-Cookie", `${SESSION_COOKIE}=${token}; ${cookieAttrs(res, SESSION_DAYS * 86400)}`);
 }
 
 export async function endSession(req: Request, res: Response) {
   const token = readCookie(req, SESSION_COOKIE);
   if (token) await db.query("DELETE FROM sessions WHERE token_hash = $1", [tokenHash(token)]);
-  res.setHeader("Set-Cookie", `${SESSION_COOKIE}=; ${cookieAttrs(0)}`);
+  res.setHeader("Set-Cookie", `${SESSION_COOKIE}=; ${cookieAttrs(res, 0)}`);
 }
 
 export async function createUser(email: string, name: string, password: string): Promise<User | null> {

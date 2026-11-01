@@ -9,6 +9,8 @@ import { purgeSamples, runIngestion } from "./services/ingest.js";
 
 const app = express();
 app.disable("x-powered-by");
+// Behind the reverse proxy the client address and https come from its X-Forwarded headers.
+if (process.env.TRUST_PROXY) app.set("trust proxy", Number(process.env.TRUST_PROXY));
 app.use(helmet());
 const origins = config.corsOrigin.split(",");
 app.use(cors({ origin: origins, credentials: true }));

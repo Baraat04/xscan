@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { RiskBoxes, SourceTag } from "@/components/Bits";
 import { classify, useStore } from "@/components/Store";
 import { api } from "@/lib/api";
@@ -10,6 +10,9 @@ import type { TenderSummary, Trial } from "@/lib/types";
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n).replace(/\s+\S*$/, "")}…` : s);
 const RULING_WORD = { SUSTAINED: "sustained", DISMISSED: "dismissed", REFER_FOR_CLARIFICATION: "ask the buyer" } as const;
 const STANCE_WORD = { contest: "Contests", partially_concede: "Concedes in part", concede: "Concedes" } as const;
+const NOT_HEARD = "Not heard yet";
+const DECK_SIZE = 12;
+const DECK_MS = 8000;
 
 /**
  * The counts the three plies carry. The canary copy shows the count the court sustained (the prosecution's strongest),
@@ -58,7 +61,9 @@ function useTyped(text: string) {
 
 export default function OverviewPage() {
   const { tenders, threshold, requireUser, setAddOpen } = useStore();
-  const [latest, setLatest] = useState<{ tender: TenderSummary; trial: Trial } | null>(null);
+  const [trials, setTrials] = useState<Record<string, Trial>>({});
+  const [caseId, setCaseId] = useState<string | null>(null);
+  const [paused, setPaused] = useState(false);
   const [fanned, setFanned] = useState(false);
 
   const groups = useMemo(() => {
@@ -67,21 +72,42 @@ export default function OverviewPage() {
     return { all, cleared: by("cleared"), waiting: by("referred"), ruled: by("ruled") };
   }, [tenders, threshold]);
 
-  // The forms are filled from the highest-risk real ruling on file.
-  const featured = useMemo(() => [...groups.ruled].sort((a, b) => (b.risk_score ?? 0) - (a.risk_score ?? 0))[0], [groups.ruled]);
-  useEffect(() => {
-    if (!featured?.trial_id) return;
-    let alive = true;
-    api.trial(featured.trial_id).then((r) => alive && r.trial.verdict && r.trial.prosecution?.charges.length && setLatest({ tender: featured, trial: r.trial })).catch(() => {});
-    return () => { alive = false; };
-  }, [featured?.trial_id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The deck deals real tenders in turn: the highest-risk rulings, then what the screening flagged, then the rest.
+  const ruledByRisk = useMemo(() => [...groups.ruled].sort((a, b) => (b.risk_score ?? 0) - (a.risk_score ?? 0)), [groups.ruled]);
+  const deck = useMemo(() => {
+    const flagged = [...groups.waiting].sort((a, b) => (b.screen_score ?? 0) - (a.screen_score ?? 0));
+    return [...ruledByRisk.slice(0, DECK_SIZE / 2), ...flagged.slice(0, DECK_SIZE / 2), ...flagged.slice(DECK_SIZE / 2), ...groups.cleared].slice(0, DECK_SIZE);
+  }, [ruledByRisk, groups.waiting, groups.cleared]);
+  const at = Math.max(0, deck.findIndex((x) => x.id === caseId));
+  const t: TenderSummary | undefined = deck[at];
+  const next = useCallback(() => setCaseId((id) => {
+    const i = deck.findIndex((x) => x.id === id);
+    return deck[(Math.max(0, i) + 1) % deck.length]?.id ?? null;
+  }), [deck]);
 
-  const t = latest?.tender;
-  const trial = latest?.trial;
+  useEffect(() => {
+    if (deck.length < 2 || paused || fanned || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const timer = setInterval(() => { if (!document.hidden) next(); }, DECK_MS);
+    return () => clearInterval(timer);
+  }, [deck.length, paused, fanned, next]);
+
+  const trialId = t?.trial_status === "complete" ? t.trial_id : null;
+  useEffect(() => {
+    if (!trialId) return;
+    let alive = true;
+    api.trial(trialId).then((r) => alive && setTrials((all) => ({ ...all, [trialId]: r.trial }))).catch(() => {});
+    return () => { alive = false; };
+  }, [trialId]);
+
+  const loaded = trialId ? trials[trialId] : undefined;
+  const trial = loaded?.verdict && loaded.prosecution?.charges.length ? loaded : undefined;
   const v = trial?.verdict;
   const p = trial ? plies(trial) : null;
+  // Until the court hears a tender, the forms carry what the free screening found and nothing more.
+  const signals = [...(t?.screen?.signals ?? [])].sort((a, b) => b.weight - a.weight);
+  const top = signals[0];
   const caseNo = t ? (t.source === "WEB" ? `WEB ${t.source_id.slice(0, 10)}` : `${t.source === "USASPENDING" ? "USA" : t.source} ${t.source_id}`) : "—";
-  const typed = useTyped(p?.ruled ?? "");
+  const typed = useTyped(p?.ruled ?? (t ? NOT_HEARD : ""));
   const log = trial ? hearingLines(trial) : [];
 
   const funnel = [
@@ -102,7 +128,7 @@ export default function OverviewPage() {
           <h1>Every tender, filed in <em>triplicate</em></h1>
           <p className="hero-lede">One copy goes to the prosecutor, one to the defense, and the original stays with the court. Every quote they use is checked against the notice.</p>
           <div className="hero-actions">
-            <Link className="btn btn-primary btn-lg" href={t ? `/court?case=${t.id}` : "/court"}>Watch the live court</Link>
+            <Link className="btn btn-primary btn-lg" href={ruledByRisk[0] ? `/court?case=${ruledByRisk[0].id}` : "/court"}>Watch the live court</Link>
             <button className="btn btn-lg" onClick={() => requireUser(() => setAddOpen(true))}>Add a tender</button>
           </div>
           <ul className="ply-key" aria-label="Which copy is whose">
@@ -113,51 +139,75 @@ export default function OverviewPage() {
           <p className="hero-keys">{tenders ? <b>{groups.all.length.toLocaleString("en-GB")}</b> : "…"} real tenders on file, from official APIs and the websites people add.</p>
         </div>
 
-        <div className="triplicate-wrap">
+        <div
+          className="triplicate-wrap"
+          onMouseEnter={() => setPaused(true)}
+          onMouseLeave={() => setPaused(false)}
+          onFocus={() => setPaused(true)}
+          onBlur={() => setPaused(false)}
+          onTouchStart={() => setPaused(true)}
+        >
           {/* Clicking the stack fans it; the button below does the same from the keyboard. */}
           <div className={`triplicate${fanned ? " fan" : ""}`} onClick={(e) => !(e.target as HTMLElement).closest("a") && setFanned((f) => !f)}>
             <div className="ply ply-d" aria-hidden={!fanned}>
               <div className="f-head"><span>Form XS-3 · Copy 3</span><span>{caseNo}</span></div>
-              <div className="f-row"><span className="f-label">Count</span><span className="f-val carbon">{p ? `${p.exhibit.id} · ${p.exhibit.title}` : "—"}</span></div>
-              <div className="f-row"><span className="f-label">Defense answer</span><span className="f-val carbon"><span className="clamp">{p?.answer ? p.answer.explanation : "Gives the most honest good reason the buyer could have."}</span></span></div>
-              <div className="f-row"><span className="f-label">Position</span><span className="f-val carbon">{p?.answer ? STANCE_WORD[p.answer.stance] : "—"}</span></div>
+              <div className="ply-body" key={t?.id}>
+                <div className="f-row"><span className="f-label">Count</span><span className="f-val carbon">{p ? `${p.exhibit.id} · ${p.exhibit.title}` : top ? top.category : "—"}</span></div>
+                <div className="f-row"><span className="f-label">Defense answer</span><span className="f-val carbon"><span className="clamp">{p?.answer ? p.answer.explanation : "Gives the most honest good reason the buyer could have."}</span></span></div>
+                <div className="f-row"><span className="f-label">Position</span><span className="f-val carbon">{p?.answer ? STANCE_WORD[p.answer.stance] : t ? NOT_HEARD : "—"}</span></div>
+              </div>
               <span className="f-copy">Copy 3 · Defense</span>
             </div>
             <div className="ply ply-p" aria-hidden={!fanned}>
               <div className="f-head"><span>Form XS-3 · Copy 2</span><span>{caseNo}</span></div>
-              <div className="f-row"><span className="f-label">Count</span><span className="f-val carbon">{p ? `${p.lead.id} · ${p.lead.title}` : "—"}</span></div>
-              <div className="f-row"><span className="f-label">Argument</span><span className="f-val carbon"><span className="clamp">{p ? p.lead.argument : "Finds conditions that fit only one supplier, and quotes the notice for each."}</span></span></div>
-              <div className="f-row"><span className="f-label">Severity</span><span className="f-val carbon">{p ? p.lead.severity[0].toUpperCase() + p.lead.severity.slice(1) : "—"}</span></div>
+              <div className="ply-body" key={t?.id}>
+                <div className="f-row"><span className="f-label">Count</span><span className="f-val carbon">{p ? `${p.lead.id} · ${p.lead.title}` : top ? top.category : "—"}</span></div>
+                <div className="f-row"><span className="f-label">Argument</span><span className="f-val carbon"><span className="clamp">{p ? p.lead.argument : top ? top.note : "Finds conditions that fit only one supplier, and quotes the notice for each."}</span></span></div>
+                <div className="f-row"><span className="f-label">Severity</span><span className="f-val carbon">{p ? p.lead.severity[0].toUpperCase() + p.lead.severity.slice(1) : t ? NOT_HEARD : "—"}</span></div>
+              </div>
               <span className="f-copy">Copy 2 · Prosecution</span>
             </div>
             <div className="ply ply-c">
               <div className="f-head"><span>Form XS-3 · Original</span><span>{caseNo}</span></div>
-              <div className="f-row"><span className="f-label">Buyer</span><span className="f-val">{t ? clip(t.buyer_name ?? "Not published", 70) : "—"}</span></div>
-              <div className="f-row"><span className="f-label">Subject</span><span className="f-val" lang={t?.language ?? undefined}><span className="clamp">{t ? t.title : "Waiting for the first ruling"}</span></span></div>
-              <div className="f-row">
-                <span className="f-label">Exhibit</span>
-                <span className="f-val" lang={t?.language ?? undefined}>{p?.exhibit.quote ? <><span className="sticker p inline">P-{p.n(p.exhibit)}</span>“{clip(p.exhibit.quote, 120)}”</> : "—"}</span>
+              <div className="ply-body" key={t?.id}>
+                <div className="f-row"><span className="f-label">Buyer</span><span className="f-val">{t ? clip(t.buyer_name ?? "Not published", 70) : "—"}</span></div>
+                <div className="f-row"><span className="f-label">Subject</span><span className="f-val" lang={t?.language ?? undefined}><span className="clamp">{t ? t.title : "Waiting for the first tender"}</span></span></div>
+                <div className="f-row">
+                  <span className="f-label">Exhibit</span>
+                  <span className="f-val" lang={t?.language ?? undefined}>
+                    {p?.exhibit.quote
+                      ? <><span className="sticker p inline">P-{p.n(p.exhibit)}</span>“{clip(p.exhibit.quote, 120)}”</>
+                      : top?.excerpt ? <>“{clip(top.excerpt, 120)}”</> : top ? clip(top.note, 120) : "—"}
+                  </span>
+                </div>
+                <div className="f-row">
+                  <span className="f-label">Not in notice</span>
+                  {p?.missing
+                    ? <span className="f-val ghost" lang={t?.language ?? undefined}>“{clip(p.missing.quote, 60)}” · no weight</span>
+                    : <span className="f-val">{p ? `None · ${p.found} of ${p.quoted} quotes found in the notice` : t ? NOT_HEARD : "—"}</span>}
+                </div>
+                <div className="f-row"><span className="f-label">Ruling</span><span className="f-val typing">{t ? <>{typed.shown}{!typed.done && <span className="caret" />}</> : "—"}</span></div>
+                <div className="f-row">
+                  <span className="f-label">Risk</span>
+                  {v
+                    ? <RiskBoxes level={v.risk_level} score={v.risk_score} typed />
+                    : <span className="f-val">{t?.screen ? `Screening ${t.screen.score.toFixed(2)} · ${signals.length} ${signals.length === 1 ? "signal" : "signals"}` : "Awaiting the court"}</span>}
+                </div>
+                {trial?.letter && t && (
+                  <Link className="tear" href={`/case/${t.id}`}>
+                    <small>Tear off here · letter to the buyer ({trial.letter.language.toUpperCase()})</small>
+                    <p lang={trial.letter.language}>{trial.letter.subject}</p>
+                  </Link>
+                )}
               </div>
-              <div className="f-row">
-                <span className="f-label">Not in notice</span>
-                {p?.missing
-                  ? <span className="f-val ghost" lang={t?.language ?? undefined}>“{clip(p.missing.quote, 60)}” · no weight</span>
-                  : <span className="f-val">{p ? `None · ${p.found} of ${p.quoted} quotes found in the notice` : "—"}</span>}
-              </div>
-              <div className="f-row"><span className="f-label">Ruling</span><span className="f-val typing">{p ? <>{typed.shown}{!typed.done && <span className="caret" />}</> : "—"}</span></div>
-              <div className="f-row">
-                <span className="f-label">Risk</span>
-                {v ? <RiskBoxes level={v.risk_level} score={v.risk_score} typed /> : <span className="f-val">Awaiting the court</span>}
-              </div>
-              {trial?.letter && t && (
-                <Link className="tear" href={`/case/${t.id}`}>
-                  <small>Tear off here · letter to the buyer ({trial.letter.language.toUpperCase()})</small>
-                  <p lang={trial.letter.language}>{trial.letter.subject}</p>
-                </Link>
-              )}
             </div>
           </div>
-          <button type="button" className="fan-toggle" onClick={() => setFanned((f) => !f)} aria-pressed={fanned}>{fanned ? "Stack the copies" : "Fan out the copies"}</button>
+          <div className="deck-bar">
+            {t && <span className="deck-count" aria-live="off">Case {at + 1} of {deck.length}</span>}
+            {deck.length > 1 && <button type="button" className="fan-toggle" onClick={next}>Next case</button>}
+            {t && <Link className="fan-toggle" href={`/case/${t.id}`}>Open this case</Link>}
+            <button type="button" className="fan-toggle fan-only" onClick={() => setFanned((f) => !f)} aria-pressed={fanned}>{fanned ? "Stack the copies" : "Fan out the copies"}</button>
+          </div>
           {log.length > 0 && (
             <div className="fanfold-slip" aria-label="Hearing log">
               <ol className="fanfold">

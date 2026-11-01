@@ -311,13 +311,17 @@ button.sticker:hover { transform: rotate(0deg) translateY(-1px); }
 /* the triplicate: three plies, the original on top; a click fans them */
 .triplicate-wrap { position: relative; padding: 18px 40px 150px 0; }
 .triplicate { display: block; position: relative; z-index: 2; width: 100%; max-width: 640px; margin-left: auto; cursor: pointer; }
-.fan-toggle { all: unset; cursor: pointer; position: absolute; right: 40px; bottom: 96px; font-family: var(--font-form); font-weight: 600; font-size: 13px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-2); text-decoration: underline; text-decoration-color: var(--form); text-underline-offset: 6px; }
+.deck-bar { position: absolute; right: 40px; bottom: 96px; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: baseline; gap: 8px 22px; }
+.deck-count { font-family: var(--font-type); font-size: 13px; color: var(--text-3); }
+.ply-body { display: grid; animation: refile 420ms var(--ease) both; }
+@keyframes refile { from { opacity: 0; translate: 0 6px; } to { opacity: 1; translate: 0 0; } }
+.fan-toggle { all: unset; cursor: pointer; font-family: var(--font-form); font-weight: 600; font-size: 13px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-2); text-decoration: underline; text-decoration-color: var(--form); text-underline-offset: 6px; }
 .fan-toggle:hover { color: var(--text); }
 .fan-toggle:focus-visible { outline: 2px solid var(--carbon); outline-offset: 4px; }
 .ply { position: absolute; inset: 0; padding: 22px 28px; transform-origin: 30% 100%; transition: transform 800ms var(--ease); display: grid; align-content: start; }
 .ply-d { transform: translate(28px, -24px) rotate(2.2deg); }
 .ply-p { transform: translate(14px, -12px) rotate(1deg); }
-.ply-c { position: relative; inset: auto; transform: none; padding-bottom: 0; }
+.ply-c { position: relative; inset: auto; transform: none; padding-bottom: 0; min-height: 420px; }
 .triplicate.fan .ply-d { transform: translate(min(30%, 230px), 46px) rotate(9deg); }
 .triplicate.fan .ply-p { transform: translate(min(16%, 112px), 16px) rotate(4deg); }
 .triplicate.fan .ply-c { transform: translate(-56px, 0) rotate(-3deg); }
@@ -885,6 +889,7 @@ div.dk-row:hover .case-title { text-decoration: underline; }
   .lane { transform: none !important; }
   .hero { grid-template-columns: minmax(0, 1fr); gap: 34px; min-height: 0; }
   .triplicate-wrap { padding: 30px 30px 0 0; max-width: 680px; }
+  .deck-bar { position: static; padding-top: 20px; }
 }
 @media (max-width: 960px) {
   .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -941,7 +946,8 @@ div.dk-row:hover .case-title { text-decoration: underline; }
   .verdict-row .mark-typed { grid-column: 1 / -1; }
   .verdict-main b { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .search-hint { padding: 0 6px; font-size: 14.5px; }
-  .fan-toggle { display: none; }
+  .fan-only { display: none; }
+  .deck-bar { position: static; justify-content: flex-start; padding: 0 var(--gx) 10px; }
   .f-copy { right: 18px; }
   .fanfold-slip { position: relative; left: auto; bottom: auto; width: auto; max-height: 180px; margin: 6px var(--gx) 0; transform: rotate(-1deg); }
   .band { padding-top: 80px; }
